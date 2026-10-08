@@ -204,6 +204,56 @@ with the changed definition and the other branch's call site (before: 45-48,
 medium, not verified); and verify-by-test runs the repo's own `.venv` with
 editable installs redirected to each worktree.
 
+## Reliability eval
+
+The model is nondeterministic, so one green run proves little.
+`make eval-reliability` (needs `NEBIUS_API_KEY` in the environment) runs every
+case N times from scratch (no model or test cache) and prints a table; raw
+results and per-run timings land in `backend/.workspace/eval/<timestamp>/`
+(rebuild the table later with `scripts/eval_reliability.py --summarize DIR`).
+
+```bash
+make eval-reliability N=5 FORCED=2 MAX_USD=0.30 PYTHON=../.venv-backend/bin/python
+```
+
+Cases: the real-world daimon pair above, the bundled checkout demo, and a
+harmless fixture (`demo/make_harmless_repo.py`: an optional parameter, a new
+caller, a behaviour-preserving refactor, a changelog) that must never be
+confirmed. Because harmless pairs normally score too low to reach
+verify-by-test, a stress case also forces verify-by-test on every harmless pair.
+
+Measured on 2026-10-08 (`nvidia/nemotron-3-super-120b-a12b`, one run of the
+command above):
+
+| case | runs | pairs | confirmed | suspected | not verified | median time (s) | tokens | $ |
+|---|---|---|---|---|---|---|---|---|
+| real case (daimon #14 x #17) | 5 | 5 | 5 | 0 | 0 | 64.3 | 183,127 | 0.0862 |
+| checkout demo, conflicting pair | 5 | 5 | 5 | 0 | 0 | 26.4 | 62,545 | 0.0354 |
+| checkout demo, docs pairs | 5 | 10 | 0 | 0 | 10 | (same runs) | | |
+| harmless fixture | 5 | 30 | 0 | 0 | 30 | 8.6 | 18,445 | 0.0082 |
+| harmless fixture, verify forced on every pair | 2 | 12 | 0 | 12 | 0 | 303.9 | 180,940 | 0.1078 |
+
+No errors and no rationale claims contradicted by the static checks in any run.
+
+What makes it stable:
+
+- **Exact static signature checks.** For every definition one branch changed
+  and the other branch calls, every call site is checked against the new
+  signature (required parameters, positional order, dataclass/pydantic fields).
+  A proven break always goes to verify-by-test, whatever the model score.
+- **Rationale claims are checked.** A rationale that says a call breaks where
+  the static check proved every call site compatible gets one repair round;
+  claims that survive are listed as unsupported in the UI.
+- **Verify-by-test feedback.** The test prompt names the broken call site and
+  its enclosing function; repair rounds name tests that only pin base
+  behaviour. One confirming test is enough even if another generated test is broken.
+- **Behaviour only.** A generated test that inspects code (source text, code
+  objects, `hasattr`) or passes only while the other branch's change is
+  absent never confirms. Failures are judged by the line they happen on, so a
+  behavioural failure in the same test still counts. Before this rule, forcing
+  verify on the harmless fixture produced 2 false confirmations in one run
+  (tests asserting `'half' not in perimeter.__code__.co_varnames`).
+
 ## Tests
 
 ```bash
