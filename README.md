@@ -85,7 +85,14 @@ is `"model_error"` or `"unparsable"`. Pairs past the cap use `"pair_cap"`.
    code. Python uses `ast` and resolves calls through the file's imports:
    `checkout.total()` only matches a `total` defined in `checkout.py`, a bare
    `total()` only matches one imported from or defined in its own module, and
-   `obj.total()` only matches a changed *method*. Other languages use a
+   `obj.total()` only matches a changed *method*. TypeScript/JavaScript uses a
+   light scanner (`ts_symbols.py`, no TS parser): strings and comments are
+   masked, declarations get brace-matched spans (functions, arrow functions,
+   classes, class and object-literal methods, interfaces/types) and a change
+   is attributed to the innermost one; a thin wrapper around a changed
+   declaration counts too (`loadSession` "via" `restoreSession`); calls
+   resolve through named, namespace and package imports and through
+   `export { x } from` / `export * from`. Other languages use a
    `def`/`function`/`func`/`fn` regex heuristic matched by name. An overlap
    needs one branch to have CHANGED the definition (both changed it, or one
    changed it and the other calls it); calls both branches make to a function
@@ -93,7 +100,7 @@ is `"model_error"` or `"unparsable"`. Pairs past the cap use `"pair_cap"`.
    branches share a file or have such an overlap; other pairs get
    `fallback_reason: "prefiltered"` and never reach the model. Each pair
    carries `symbol_overlap` and `symbol_evidence` (who changed it, who calls
-   it, in which file).
+   it, in which file), calls from the other branch's tests first.
 2. **Top-K.** Only the `NEBIUS_MAX_PAIRS` (default 5) strongest candidates
    are sent to Nemotron; the rest get `"pair_cap"`.
 3. **Disk cache.** Model results are cached under
@@ -117,6 +124,32 @@ same sandbox as verify-by-test below (throwaway worktrees, the repo's own
 independently of the model triage: no LLM call, $0, and a low model score
 cannot suppress it.
 
+Python test files run with pytest. JS/TS test files (`*.test.ts`,
+`*.spec.tsx`, ...) run with the package's own **vitest or jest**:
+
+- The package manager comes from the root lockfile (`package-lock.json`,
+  `pnpm-lock.yaml`, `yarn.lock`), the runner from the nearest `package.json`
+  that declares vitest or jest (dependency, `test` script or config file).
+- Dependencies are installed **once per lockfile** into a shared cache
+  (`WORKSPACE_DIR/js-deps/`): only the manifests are copied, lifecycle
+  scripts are stripped and disabled (`npm ci --ignore-scripts`,
+  `pnpm install --frozen-lockfile --ignore-scripts`, yarn equivalents). This
+  is the only step with network access; it runs outside the test sandbox,
+  with the stripped environment, only for repos under the allowed roots.
+  npm fingerprints ignore the workspace packages' own version fields, so a
+  release bump does not force a reinstall.
+- Each worktree gets `node_modules` symlinked into that install (workspace
+  packages point at the worktree's own code). Only workspace packages that
+  the tested package imports through a missing build output (`dist/...`) are
+  built, inside the sandbox, capped at `BRANCH_TESTS_JS_BUILD_SECONDS` (300)
+  per pair, and cached by their git tree hash.
+- Tests run per package with the runner's JSON reporter, inside the sandbox
+  (macOS `sandbox-exec`: localhost only, writes only in the temp dir) plus a
+  `--require` network guard (no TCP or DNS beyond loopback).
+- At most `BRANCH_TESTS_JS_MAX_PACKAGES` test packages per pair (3; packages
+  touched by both branches first). `branch_tests.setup`, `install_s` and
+  `build_s` report what the install and builds cost.
+
 `pairs[].branch_tests.status` is:
 
 - `confirmed`: a branch's own test passes on its branch and fails on A+B,
@@ -129,13 +162,14 @@ cannot suppress it.
   labels it **Confirmed by branch test (existing tests, no LLM)**, separate
   from **Confirmed by intent test (Nemotron)**.
 - `passed`: ran, no such test. `skipped`: no test files changed, or a textual
-  merge conflict. `unsupported`: only JS/TS test files changed (pytest only;
-  running vitest would need `node_modules` and a build in every worktree).
-  `error`: could not run (for example a timeout).
+  merge conflict. `unsupported`: only test files that cannot run (JS/TS with
+  no vitest/jest setup, no `node`, or `BRANCH_TESTS_JS_ENABLED=false`).
+  `error`: could not run (for example a timeout or a failed install).
 
 Limits: at most `BRANCH_TESTS_MAX_PAIRS` pairs (default 6, highest prefilter
 signal first), `BRANCH_TESTS_MAX_FILES` test files per branch (20),
-`BRANCH_TESTS_TIMEOUT_SECONDS` per pytest run (120) and
+`BRANCH_TESTS_TIMEOUT_SECONDS` per pytest / vitest / jest run (120),
+`BRANCH_TESTS_JS_INSTALL_SECONDS` for a one-time dependency install (900) and
 `BRANCH_TESTS_TOTAL_SECONDS` for the whole stage (600; later pairs are
 skipped). It runs only where verify-by-test may run (local repos under
 `VERIFY_ALLOWED_ROOTS`, `"verify": true`). `BRANCH_TESTS_ENABLED=false` turns
@@ -215,8 +249,9 @@ More real cases, and the ones MergeGuard did not confirm, are in the
 [Semantic Conflict Hall of Fame](docs/HALL_OF_FAME.md)
 (`python3 demo/replay.py --list`). With the branch-test stage, the current
 pipeline confirms daimon, KISS and elastic 3/3 each (daimon by both layers,
-KISS and elastic by the branch test only); TypeScript qwen-code is not
-supported by either layer.
+KISS and elastic by the branch test only) and, since the branch-test stage
+runs vitest/jest, the TypeScript qwen-code pair 3/3 (branch test only; the
+intent-test layer is still Python-only).
 
 What `--prove` shows (`pytest packages/adapters/discord/tests -k "branding or privacy_panel or purge"`):
 
@@ -297,6 +332,29 @@ Harmless pairs: 42 pair-runs, **0 false confirmations** (branch test 0,
 intent test 0). Total spend for this re-measure: $0.3484. The branch-test
 stage adds no LLM cost; it took 12.9-33.6 s per run on the three Python
 replays.
+
+After adding JS/TS branch tests and the TypeScript prefilter (prompt
+`risk-v9`), re-measured on 2026-10-08 (raw results
+`backend/.workspace/eval/20261008-203026/` and `.../20261008-203912/`). The
+JS dependency cache was deleted first, so run 1 of qwen-code includes the
+one-time npm install:
+
+| case | runs | pairs | confirmed | by branch test | by intent test | branch-test status | time per run (s) | JS install / builds (s) | tokens | $ |
+|---|---|---|---|---|---|---|---|---|---|---|
+| qwen-code #8947 x #8933 (TypeScript) | 3 | 3 | **3** | 3 | 0 (skipped: Python-only) | confirmed 3 | 253.2, 136.3, 136.0 | 29.3 / 89.0 in run 1; 0 / 0 (cached) in runs 2-3 | 12,659 | 0.0055 |
+| checkout demo, conflicting pair | 1 | 1 | 1 | 1 | 1 | confirmed 1 | 22.4 | - | 9,472 | 0.0049 |
+| checkout demo, docs pairs | 1 | 2 | 0 | 0 | 0 | not run 2 | (same run) | - | | |
+| harmless fixture | 1 | 6 | 0 | 0 | 0 | passed 3, not run 3 | 10.2 | - | 3,815 | 0.0017 |
+| harmless fixture, both layers forced on every pair | 1 | 6 | 0 | 0 | 0 (suspected 6) | passed 5, skipped 1 | 281.7 | - | 89,078 | 0.0521 |
+
+Harmless pairs: 14 pair-runs, **0 false confirmations**. Spend: $0.0642. The
+qwen-code branch-test stage took 235.5 s in run 1 (npm install 29.3 s,
+workspace builds 89.0 s: `packages/core`, `packages/acp-bridge`,
+`packages/sdk-typescript`) and 115.8 s / 115.3 s with the cache warm; the
+rest is 11 vitest runs (3 packages x A, B, A+B, plus the merge-base and a
+re-run of the failing file). The harmless fixtures are Python; the JS/TS
+harmless pair is covered by `tests/test_js_branch_tests.py` (real git, real
+node, a stand-in runner) and `tests/test_ts_prefilter.py`.
 
 What makes it stable:
 
@@ -424,9 +482,11 @@ backend/            FastAPI service
       nemotron.py     Token Factory chat-completions client
       sentinel.py     conflict-risk scoring (git, optional Nemotron blend)
       prefilter.py    static symbol/call prefilter before any LLM call
+      ts_symbols.py   TypeScript/JavaScript declarations, imports, re-exports for the prefilter
       cache.py        on-disk Nemotron result cache
       verifier.py     verify-by-test (generated pytest in throwaway worktrees)
       branch_tests.py branch tests on merge (each branch's own tests on A+B, no LLM)
+      js_tests.py     vitest/jest for branch tests: shared install per lockfile, minimal builds
   tests/
 frontend/           dashboard (to be scaffolded)
 docs/               customer discovery + notes
