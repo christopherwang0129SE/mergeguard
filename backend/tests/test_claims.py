@@ -67,7 +67,7 @@ def test_refine_runs_one_repair_round_on_a_contradicted_rationale(
     monkeypatch.setattr("app.services.nemotron.complete", fake)
     res = sentinel.analyze(repo, "main", ["feat-a", "feat-b"], use_cache=False)
     pair = res.pairs[0]
-    assert "Static signature checks (exact):" in prompts[0]
+    assert "Static signature checks (exact, parameters only):" in prompts[0]
     assert "- compatible: create_session" in prompts[0]
     assert len(prompts) == 2 and "every call site in the other branch" in prompts[1]
     assert pair.model_score == 80 and "create_session" not in pair.rationale

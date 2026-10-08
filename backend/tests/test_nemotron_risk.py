@@ -388,3 +388,21 @@ def test_excerpt_is_trimmed_to_fit_not_dropped_when_the_body_is_large() -> None:
     assert len(prompt) <= MAX_PROMPT_CHARS
     assert "[breaking signature change: new required c] evidence first" in prompt
     assert "(omitted; context budget)" not in prompt
+
+
+def test_empty_static_section_says_only_parameters_were_compared() -> None:
+    from app.schemas import BranchDiff, PairRisk
+    from app.services import cache
+    from app.services.nemotron import SYSTEM_PROMPT, build_pair_prompt
+
+    diff = BranchDiff(branch="a", base="main", merge_base="x", ahead=1, files=[])
+    pair = PairRisk(branch_a="a", branch_b="b", score=0.0, level="none", rationale="r",
+                    shared_files=0, overlapping_files=0, collisions=[],
+                    symbol_overlap=["P"], symbol_evidence=["P: changed by a, called by b"])
+    prompt = build_pair_prompt(base_branch="main", pair=pair, diff_a=diff, diff_b=diff,
+                               commits_a=[], commits_b=[], excerpt="")
+    assert "no signature change" not in prompt
+    assert "Static signature checks (exact, parameters only):" in prompt
+    assert "return values and behaviour were NOT checked" in prompt
+    assert "PARAMETERS only" in SYSTEM_PROMPT
+    assert cache.PROMPT_VERSION == "risk-v8"
