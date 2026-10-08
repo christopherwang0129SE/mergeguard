@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest'
-import { levelToColor, levelToText, getBranchRiskLevel, sortPairsByScoreDesc } from './risk'
+import {
+  levelToColor,
+  levelToText,
+  getBranchRiskLevel,
+  sortPairsByScoreDesc,
+  gitLevelFromScore,
+  isFloorRule,
+  isHiddenConflict,
+  levelRank,
+} from './risk'
 import type { PairRisk, RiskLevel } from '../types'
 
 describe('risk utils', () => {
@@ -46,6 +55,107 @@ describe('risk utils', () => {
       expect(levelToText('high')).toBe('High')
       // @ts-ignore
       expect(levelToText('unknown' as RiskLevel)).toBe('Unknown')
+    })
+  })
+
+  describe('gitLevelFromScore', () => {
+    // Same thresholds as the backend (backend/app/services/sentinel.py _level):
+    // >=70 high, >=40 medium, >0 low, otherwise none.
+    it('maps scores to the backend thresholds', () => {
+      expect(gitLevelFromScore(0)).toBe('none')
+      expect(gitLevelFromScore(0.1)).toBe('low')
+      expect(gitLevelFromScore(39.9)).toBe('low')
+      expect(gitLevelFromScore(40)).toBe('medium')
+      expect(gitLevelFromScore(69.9)).toBe('medium')
+      expect(gitLevelFromScore(70)).toBe('high')
+      expect(gitLevelFromScore(100)).toBe('high')
+    })
+  })
+
+  describe('levelRank', () => {
+    it('orders none < low < medium < high', () => {
+      expect(levelRank('none')).toBeLessThan(levelRank('low'))
+      expect(levelRank('low')).toBeLessThan(levelRank('medium'))
+      expect(levelRank('medium')).toBeLessThan(levelRank('high'))
+    })
+  })
+
+  describe('isFloorRule', () => {
+    it('is true when overlapping files exist and git outscored the model', () => {
+      expect(
+        isFloorRule({ overlapping_files: 2, git_score: 80, model_score: 40 })
+      ).toBe(true)
+    })
+    it('is false when there are no overlapping files', () => {
+      expect(
+        isFloorRule({ overlapping_files: 0, git_score: 80, model_score: 40 })
+      ).toBe(false)
+    })
+    it('is false when the model score is not below the git score', () => {
+      expect(
+        isFloorRule({ overlapping_files: 1, git_score: 40, model_score: 80 })
+      ).toBe(false)
+      expect(
+        isFloorRule({ overlapping_files: 1, git_score: 40, model_score: 40 })
+      ).toBe(false)
+    })
+    it('is false when the model score is missing', () => {
+      expect(
+        isFloorRule({ overlapping_files: 1, git_score: 40, model_score: null })
+      ).toBe(false)
+    })
+  })
+
+  describe('isHiddenConflict', () => {
+    it('is true when the model source is used and the model level exceeds the git level', () => {
+      expect(
+        isHiddenConflict({
+          score_source: 'model',
+          model_level: 'high',
+          git_score: 10,
+        })
+      ).toBe(true)
+      expect(
+        isHiddenConflict({
+          score_source: 'model',
+          model_level: 'medium',
+          git_score: 10,
+        })
+      ).toBe(true)
+    })
+    it('is false when the model level does not exceed the git level', () => {
+      expect(
+        isHiddenConflict({
+          score_source: 'model',
+          model_level: 'low',
+          git_score: 50,
+        })
+      ).toBe(false)
+      expect(
+        isHiddenConflict({
+          score_source: 'model',
+          model_level: 'medium',
+          git_score: 50,
+        })
+      ).toBe(false)
+    })
+    it('is false when the published score came from git', () => {
+      expect(
+        isHiddenConflict({
+          score_source: 'git',
+          model_level: 'high',
+          git_score: 10,
+        })
+      ).toBe(false)
+    })
+    it('is false when the model level is missing', () => {
+      expect(
+        isHiddenConflict({
+          score_source: 'model',
+          model_level: null,
+          git_score: 10,
+        })
+      ).toBe(false)
     })
   })
 

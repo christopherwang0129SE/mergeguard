@@ -29,6 +29,80 @@ export const levelToText = (level: RiskLevel): string => {
   }
 };
 
+/**
+ * Numeric order of risk levels: none < low < medium < high.
+ */
+export const levelRank = (level: RiskLevel): number => {
+  switch (level) {
+    case 'none':
+      return 0;
+    case 'low':
+      return 1;
+    case 'medium':
+      return 2;
+    case 'high':
+      return 3;
+    default:
+      return -1;
+  }
+};
+
+/**
+ * Git risk level from a 0-100 score, using the same thresholds as the
+ * backend (backend/app/services/sentinel.py `_level`):
+ * >=70 high, >=40 medium, >0 low, otherwise none.
+ */
+export const gitLevelFromScore = (score: number | null | undefined): RiskLevel => {
+  if (score === null || score === undefined) {
+    return 'none';
+  }
+  if (score >= 70) {
+    return 'high';
+  }
+  if (score >= 40) {
+    return 'medium';
+  }
+  if (score > 0) {
+    return 'low';
+  }
+  return 'none';
+};
+
+/**
+ * The floor rule: when the branches' changed regions actually overlap
+ * (`overlapping_files > 0`) and the git heuristic outscored the model
+ * (`git_score > model_score`), the published score is floored at the git
+ * score. The UI then explains that the model's lower assessment was kept
+ * at the git level.
+ */
+export const isFloorRule = (pair: {
+  overlapping_files?: number;
+  git_score?: number | null;
+  model_score?: number | null;
+}): boolean =>
+  (pair.overlapping_files ?? 0) > 0 &&
+  pair.git_score !== null &&
+  pair.git_score !== undefined &&
+  pair.model_score !== null &&
+  pair.model_score !== undefined &&
+  pair.git_score > pair.model_score;
+
+/**
+ * A hidden conflict: the published score came from the model
+ * (`score_source === 'model'`) and the model's level is strictly higher
+ * than the git level derived from `git_score` — the model flagged a
+ * semantic clash the diff heuristic missed.
+ */
+export const isHiddenConflict = (pair: {
+  score_source?: 'model' | 'git';
+  model_level?: RiskLevel | null;
+  git_score?: number | null;
+}): boolean =>
+  pair.score_source === 'model' &&
+  pair.model_level !== null &&
+  pair.model_level !== undefined &&
+  levelRank(pair.model_level) > levelRank(gitLevelFromScore(pair.git_score));
+
 export const getBranchRiskLevel = (
   branch: string,
   pairs: PairRisk[]
@@ -42,16 +116,8 @@ export const getBranchRiskLevel = (
   }
 
   const levels: RiskLevel[] = relevantPairs.map((pair) => pair.level);
-  // Order: none < low < medium < high
-  const levelOrder: Record<RiskLevel, number> = {
-    none: 0,
-    low: 1,
-    medium: 2,
-    high: 3,
-  };
-
   const maxLevel = levels.reduce((max, level) =>
-    levelOrder[level] > levelOrder[max] ? level : max
+    levelRank(level) > levelRank(max) ? level : max
   , 'none');
 
   return maxLevel;
