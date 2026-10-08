@@ -13,6 +13,8 @@ Cases (local repos under demo/, built if missing):
 - checkout-demo: feat/discount-cap x feat/tax-before-discount expected
   confirmed; the docs/readme pairs are harmless.
 - harmless-demo: every pair is harmless (demo/make_harmless_repo.py).
+- harmless-demo-forced-verify: the same repo with verify-by-test forced on
+  EVERY pair (normally harmless pairs never reach verify); --forced-runs runs.
 
 A harmless pair must never be confirmed. Raw results go to
 backend/.workspace/eval/<timestamp>/ (gitignored).
@@ -33,7 +35,10 @@ DEMO = ROOT / "demo"
 sys.path.insert(0, str(BACKEND))
 
 from app.config import settings  # noqa: E402
-from app.services import git_service, sentinel  # noqa: E402
+from app.services import git_service, sentinel, verifier  # noqa: E402
+
+_is_high_risk = verifier.is_high_risk
+_max_pairs = settings.verify_max_pairs
 
 
 @dataclass
@@ -42,6 +47,7 @@ class Case:
     repo: Path
     build: list[str]
     expect_confirmed: set[frozenset[str]]
+    force_verify: bool = False  # verify every pair, whatever its score
 
 
 CASES = [
@@ -59,6 +65,10 @@ CASES = [
     ),
     Case("harmless-demo", DEMO / "harmless-demo",
          [sys.executable, str(DEMO / "make_harmless_repo.py")], set()),
+    # Stress test of the verifier itself: generate and run tests for EVERY
+    # harmless pair (normally they never reach verify), none may confirm.
+    Case("harmless-demo-forced-verify", DEMO / "harmless-demo",
+         [sys.executable, str(DEMO / "make_harmless_repo.py")], set(), force_verify=True),
 ]
 
 
@@ -87,6 +97,8 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--max-usd", type=float, default=1.0)
     ap.add_argument("--cases", default=",".join(c.name for c in CASES))
+    ap.add_argument("--forced-runs", type=int, default=3,
+                    help="runs for the forced-verify stress case (6 verifies per run)")
     args = ap.parse_args()
     if not settings.nebius_api_key:
         print("NEBIUS_API_KEY is not set", file=sys.stderr)
@@ -104,7 +116,13 @@ def main() -> int:
         branches = git_service.list_branches(case.repo, exclude="main")
         target = Row(f"{case.name} (expected confirmed)")
         harmless = Row(f"{case.name} (harmless pairs)")
-        for i in range(1, args.runs + 1):
+        if case.force_verify:
+            verifier.is_high_risk = lambda _pair: True
+            settings.verify_max_pairs = 100
+        else:
+            verifier.is_high_risk = _is_high_risk
+            settings.verify_max_pairs = _max_pairs
+        for i in range(1, (args.forced_runs if case.force_verify else args.runs) + 1):
             if spent >= args.max_usd:
                 stopped = f"budget reached (${spent:.4f} >= ${args.max_usd}) before {case.name} run {i}"
                 break

@@ -47,7 +47,7 @@ from app.services import cache, git_service, nemotron, prefilter
 from app.services.nemotron import NemotronError
 from app.services.usage import UsageMeter
 
-PROMPT_VERSION = "verify-v6"
+PROMPT_VERSION = "verify-v7"
 TEST_FILENAME = "test_mergeguard_intent.py"
 MAX_OUTPUT_CHARS = 4000
 MAX_FILE_CHARS = 5000
@@ -257,6 +257,32 @@ def break_hints(
         if len(out) >= 3:
             break
     return out
+
+
+def sharpen_problem(runs: list[VerifyRun], hints: list[str]) -> str:
+    """Feedback when every test passes on its branch but none confirms."""
+    by_target = {r.target: r for r in runs}
+    base = by_target.get("base")
+    pinned = []
+    for target in ("a", "b"):
+        own = by_target.get(target)
+        for name, outcome in sorted((own.cases if own else {}).items()):
+            if outcome == "passed" and base and base.cases.get(name) == "passed":
+                pinned.append(name)
+    text = (
+        "The previous test passes on each branch, but no test that captures a branch's "
+        "change (fails on the base) fails on the merge of A and B, so it does not exercise "
+        "the interaction. Choose inputs and the shared entry point so both changes take "
+        "effect together."
+    )
+    if pinned:
+        text += (
+            " These tests also pass on the merge-base, so they pin unchanged behaviour instead "
+            "of their branch's change: " + ", ".join(pinned) + "."
+        )
+    if hints:
+        text += " Use the exact static check:\n" + "\n".join(hints)
+    return text
 
 
 def build_repair_prompt(original: str, code: str, failures: list[VerifyRun], problem: str) -> str:
@@ -765,6 +791,10 @@ def verify_pair(
     max_attempts = max(1, int(settings.verify_max_attempts))
 
     try:
+        hints = break_hints(repo, base, pair.branch_a, pair.branch_b, list(pair.symbol_evidence))
+    except git_service.GitError:
+        hints = []
+    try:
         sha_base = git_service.merge_base(repo, sha_a, sha_b) or git_service.rev_parse(repo, base)
         with _Worktrees(repo, sha_a, sha_b, sha_base) as wt:
             next_prompt = prompt
@@ -822,13 +852,7 @@ def verify_pair(
                     next_prompt = build_repair_prompt(prompt, code, failing, problem)
                 else:
                     next_prompt = build_repair_prompt(
-                        prompt,
-                        code,
-                        runs[2:],
-                        "The previous test passes on each branch, but no test that captures a "
-                        "branch's change (fails on the base) fails on the merge of A and B, so "
-                        "it does not exercise the interaction. Choose inputs and the shared "
-                        "entry point so both changes take effect together.",
+                        prompt, code, runs[2:], sharpen_problem(runs, hints)
                     )
                 code = None
 

@@ -201,6 +201,8 @@ def test_suspected_when_merge_also_passes(vrepo: Path, monkeypatch: pytest.Monke
     # One sharpening round was attempted with the merge result as feedback.
     assert len(prompts) == settings.verify_max_attempts == 4
     assert "does not exercise the interaction" in prompts[1]
+    # Names the tests that pin unchanged base behaviour.
+    assert "pin unchanged behaviour instead of their branch's change: " in prompts[1]
 
 
 def test_sharpen_round_turns_a_weak_test_into_a_confirmation(
