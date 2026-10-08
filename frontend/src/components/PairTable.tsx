@@ -1,11 +1,13 @@
-import { levelToColor, levelToText } from '../utils/risk';
-import { sortPairsByScoreDesc } from '../utils/risk';
+import { levelToColor, levelToText, sortPairsByScoreDesc } from '../utils/risk';
 import type { PairRisk } from '../types';
 
 interface PairTableProps {
   pairs: PairRisk[];
   risk_model: string | null;
 }
+
+const formatScore = (score: number | null | undefined): string =>
+  score === null || score === undefined ? '—' : String(Math.round(score));
 
 export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
   const sortedPairs = sortPairsByScoreDesc(pairs);
@@ -19,7 +21,7 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
         </div>
       )}
       {sortedPairs.length === 0 ? (
-        <p>No branch pairs to display.</p>
+        <p className="empty-state">No branch pairs to display.</p>
       ) : (
         <table>
           <thead>
@@ -28,11 +30,11 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
               <th>Branch B</th>
               <th>Score</th>
               <th>Level</th>
-              <th>Score Source</th>
+              <th>Git Score</th>
+              <th>Model Score</th>
+              <th>Source</th>
+              <th>Fallback</th>
               <th>Rationale</th>
-              {pairs[0]?.fallback_reason !== undefined && (
-                <th>Fallback Reason</th>
-              )}
             </tr>
           </thead>
           <tbody>
@@ -40,24 +42,30 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
               <tr key={`${pair.branch_a}-${pair.branch_b}`}>
                 <td>{pair.branch_a}</td>
                 <td>{pair.branch_b}</td>
-                <td>{pair.score.toFixed(1)}</td>
+                <td>{Math.round(pair.score)}</td>
                 <td>
                   <span
-                    style={{
-                      display: 'inline-block',
-                      width: '12px',
-                      height: '12px',
-                      backgroundColor: levelToColor(pair.level),
-                      marginRight: '8px',
-                    }}
+                    className="level-dot"
+                    style={{ backgroundColor: levelToColor(pair.level) }}
+                    aria-hidden="true"
                   ></span>
                   {levelToText(pair.level)}
                 </td>
-                <td>{pair.score_source}</td>
+                <td>{formatScore(pair.git_score)}</td>
+                <td>{formatScore(pair.model_score)}</td>
+                <td>
+                  <span className={`badge badge-${pair.score_source}`}>
+                    {pair.score_source}
+                  </span>
+                </td>
+                <td>
+                  {pair.fallback_reason ? (
+                    <span className="badge badge-fallback">{pair.fallback_reason}</span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
                 <td>{pair.rationale}</td>
-                {pair.fallback_reason !== undefined && (
-                  <td>{pair.fallback_reason ?? '-'}</td>
-                )}
               </tr>
             ))}
           </tbody>
