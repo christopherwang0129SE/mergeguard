@@ -17,7 +17,11 @@ file's imports, so ``checkout.total(...)`` only matches a ``total`` defined in
 defined in its own module, and ``obj.total()`` (a method call on some object)
 only matches a changed *method* named ``total``. Other languages use a regex
 heuristic (``def`` / ``function`` / ``func`` / ``fn`` names and ``name(`` call
-sites on changed lines) matched by name.
+sites on changed lines) matched by name, except TypeScript / JavaScript, which
+uses :mod:`ts_symbols`: the innermost changed declaration (function, class,
+class or object-literal method, interface / type), thin wrappers around it
+(``loadSession`` -> ``restoreSession``, reported ``via``), and calls resolved
+through ``import`` statements and ``export ... from`` re-exports.
 
 A class counts as changed when its header or one of its field declarations
 changed (the fields are the constructor of a dataclass / pydantic model), and
@@ -35,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.schemas import BranchDiff
-from app.services import git_service
+from app.services import git_service, ts_symbols
 
 # Dunders, builtins and unittest helpers never count as an overlap.
 _IGNORED_NAMES = {
@@ -57,7 +61,7 @@ _REGEX_ARROW = re.compile(
     r"(?:\([^)]*\)|[A-Za-z_]\w*)\s*=>"
 )
 _REGEX_CALL = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
-MAX_FILE_BYTES = 400_000
+MAX_FILE_BYTES = 1_500_000  # big TS files (a 18k-line bridge.test.ts) still count
 
 # Call targets that are not a resolved module.
 ANY = "*"  # regex heuristic: match a changed def of that name in any module
@@ -71,6 +75,7 @@ class Def:
     name: str
     kind: str  # "function" | "method" | "class" | "constant"
     path: str
+    via: str = ""  # thin wrapper: the changed definition it calls
 
 
 @dataclass(frozen=True)
@@ -107,7 +112,10 @@ class PairSignal:
 
 
 def module_name(path: str) -> str:
-    """``pkg/mod.py`` -> ``pkg.mod``; ``pkg/__init__.py`` -> ``pkg``."""
+    """``pkg/mod.py`` -> ``pkg.mod``; ``pkg/__init__.py`` -> ``pkg``;
+    ``pkg/src/index.ts`` -> ``pkg.src``."""
+    if ts_symbols.is_ts(path):
+        return ts_symbols.ts_module(path)
     parts = list(Path(path).with_suffix("").parts)
     if parts and parts[-1] == "__init__":
         parts = parts[:-1]
@@ -279,11 +287,47 @@ def regex_symbols(
     return out
 
 
+# Method names too generic to count as evidence when called as ``obj.name()``
+# from TS/JS (collections, promises, test matchers, DOM, streams).
+_TS_GENERIC_METHODS = {
+    "get", "set", "has", "add", "delete", "clear", "push", "pop", "shift", "map", "filter",
+    "find", "some", "every", "reduce", "forEach", "includes", "join", "split", "slice",
+    "splice", "then", "catch", "finally", "resolve", "reject", "all", "keys", "values",
+    "entries", "toString", "trim", "replace", "test", "exec", "match", "emit", "on", "off",
+    "once", "write", "end", "close", "send", "call", "apply", "bind", "log", "warn", "error",
+    "info", "debug", "parse", "stringify", "assign", "from", "of", "now", "toBe", "toEqual",
+    "toHaveBeenCalled", "toHaveBeenCalledWith", "toThrow", "toMatchObject", "toContain",
+    "mockReturnValue", "mockResolvedValue", "mockImplementation", "fn", "spyOn", "next",
+    "length", "sort", "concat", "indexOf", "startsWith", "endsWith", "create", "update",
+    "run", "start", "stop", "dispose", "render", "listen",
+}
+
+
+def ts_file_symbols(source: str, hunks: list[tuple[int, int]], path: str) -> BranchSymbols:
+    """TS/JS: changed declarations (with thin wrappers) and resolved calls."""
+    this_module = module_name(path)
+    out = BranchSymbols()
+    for d in ts_symbols.changed_decls(source, hunks):
+        out.defs.add(Def(this_module, d.name, d.kind, path, d.via))
+    local = {d.name for d in ts_symbols.declarations(source)}
+    for module, name in ts_symbols.calls_on_lines(source, path, hunks, local):
+        if module == ".":
+            if name in _TS_GENERIC_METHODS:
+                continue
+            module = METHOD
+        elif module == "?":
+            module = UNRESOLVED
+        out.calls.add(Call(module, name, path))
+    return out
+
+
 def file_symbols(path: str, source: str, hunks: list[tuple[int, int]]) -> BranchSymbols:
     if path.endswith(".py"):
         parsed = python_symbols(source, hunks, path)
         if parsed is not None:
             return parsed
+    if ts_symbols.is_ts(path):
+        return ts_file_symbols(source, hunks, path)
     return regex_symbols(source, hunks, path)
 
 
@@ -332,7 +376,7 @@ class _ModuleIndex:
             except git_service.GitError:
                 listing = ""
             for path in listing.splitlines():
-                if path.endswith(".py"):
+                if path.endswith(".py") or ts_symbols.is_ts(path):
                     self._by_module.setdefault(module_name(path), []).append(path)
         return self._by_module
 
@@ -351,9 +395,12 @@ class _ModuleIndex:
                 source = git_service.show_file(self.repo, self.ref, path) or ""
             except git_service.GitError:
                 source = ""
-            self._exports[path] = _reexports(
-                source, module_name(path), path.endswith("__init__.py")
-            )
+            if ts_symbols.is_ts(path):
+                self._exports[path] = ts_symbols.reexports(source, path)
+            else:
+                self._exports[path] = _reexports(
+                    source, module_name(path), path.endswith("__init__.py")
+                )
         return self._exports[path]
 
 
@@ -364,19 +411,28 @@ def resolve_reexports(calls: set[Call], index: _ModuleIndex) -> set[Call]:
     """Add the defining module for calls that go through a re-export."""
     extra: set[Call] = set()
     for call in calls:
-        if call.module in (ANY, METHOD, UNRESOLVED):
+        if call.module in (ANY, METHOD, UNRESOLVED) or call.module.startswith("pkg:"):
             continue
-        module, name = call.module, call.name
+        frontier = [(call.module, call.name)]
         for _ in range(REEXPORT_DEPTH):
-            target = None
-            for path in index.paths(module):
-                target = index.exports(path).get(name)
-                if target:
-                    break
-            if not target:
+            following = []
+            for module, name in frontier:
+                for path in index.paths(module):
+                    exports = index.exports(path)
+                    targets = [exports[name]] if name in exports else []
+                    # TS `export * from './x'`: the name may come from any of them.
+                    targets += [f"{t.split(':', 1)[0]}:{name}" for k, t in exports.items()
+                                if k.startswith("*") and t.endswith(":*")]
+                    for target in targets:
+                        mod, nm = target.split(":", 1)
+                        if Call(mod, nm, call.path) not in extra:
+                            extra.add(Call(mod, nm, call.path))
+                            following.append((mod, nm))
+                    if targets:
+                        break
+            frontier = following
+            if not frontier:
                 break
-            module, name = target.split(":", 1)
-            extra.add(Call(module, name, call.path))
     return calls | extra
 
 
@@ -411,7 +467,30 @@ def _call_hits(call: Call, d: Def) -> bool:
         return d.kind == "method"
     if call.module == UNRESOLVED:
         return False  # a builtin, a local, or a star import: not evidence
+    if call.module.startswith("pkg:"):
+        # TS import from a package specifier (a workspace package such as
+        # "@scope/core"): matched by the imported name, TS definitions only.
+        return ts_symbols.is_ts(d.path) and d.kind != "constant"
     return _same_module(call.module, d.module)
+
+
+_TEST_PATH = re.compile(r"(^|/)(tests?|__tests__)/|(^|/)test_[^/]*\.py$|_test\.py$|"
+                        r"\.(test|spec)\.[cm]?[jt]sx?$")
+
+
+def is_test_path(path: str) -> bool:
+    return bool(_TEST_PATH.search(path))
+
+
+def _evidence_rank(line: str) -> tuple[int, str]:
+    """Most specific evidence first: the other branch's TEST calls the changed
+    definition, then other resolved calls, then definitions both changed."""
+    m = _EVIDENCE_CALL.match(line)
+    if m and not is_test_path(m["def_path"]):
+        return (0 if is_test_path(m["call_path"]) else 1, line)
+    if m:
+        return (2, line)  # a test helper changed by one branch, used by the other's test
+    return (3, line)
 
 
 def symbol_overlap(
@@ -440,11 +519,14 @@ def symbol_overlap(
         for d in defs:
             for c in calls:
                 if _call_hits(c, d):
+                    via = f" via {d.via}" if d.via else ""
                     hits.setdefault(d.name, set()).add(
-                        f"{d.name}: changed by {changer} ({d.path}), called by {caller} ({c.path})"
+                        f"{d.name}: changed by {changer} ({d.path}){via}, "
+                        f"called by {caller} ({c.path})"
                     )
-    names = tuple(sorted(hits))
-    evidence = tuple(sorted(e for name in names for e in hits[name]))
+    evidence = tuple(sorted((e for name in hits for e in hits[name]), key=_evidence_rank))
+    best = {name: min(_evidence_rank(e) for e in lines) for name, lines in hits.items()}
+    names = tuple(sorted(hits, key=lambda n: (best[n][0], n)))
     return names, evidence
 
 
@@ -453,8 +535,8 @@ def symbol_overlap(
 # ---------------------------------------------------------------------------
 
 _EVIDENCE_CALL = re.compile(
-    r"^(?P<name>[\w.]+): changed by (?P<changer>\S+) \((?P<def_path>[^()]+)\), "
-    r"called by (?P<caller>\S+) \((?P<call_path>[^()]+)\)$"
+    r"^(?P<name>[\w.$]+): changed by (?P<changer>\S+) \((?P<def_path>[^()]+)\)"
+    r"(?: via (?P<via>[\w$]+))?, called by (?P<caller>\S+) \((?P<call_path>[^()]+)\)$"
 )
 MAX_SNIPPET_LINES = 30
 
@@ -732,4 +814,67 @@ def evidence_snippets(
         elif c.verdict == "compatible":
             label = f"{label}; every call site matches"
         items.append(f"[{label}] {c.evidence}\n{c.snippet}")
+    if len(items) < max_items:
+        items += ts_snippets(repo, base_branch, evidence, max_items - len(items))
     return "\n\n".join(items)
+
+
+def _ts_call_site(old_src: str | None, new_src: str, name: str, around: int = 3) -> str:
+    """Lines around the first call of ``name`` the branch added (else the first call)."""
+    lines = new_src.splitlines()
+    old = set((old_src or "").splitlines())
+    pattern = re.compile(rf"(?<![\w$]){re.escape(name)}\s*\(")
+    hits = [i for i, ln in enumerate(lines) if pattern.search(ln)]
+    if not hits:
+        return ""
+    added = [i for i in hits if lines[i] not in old]
+    i = (added or hits)[0]
+    lo, hi = max(i - around, 0), min(i + around + 1, len(lines))
+    return "\n".join(f"{n + 1:>5}  {lines[n]}" for n in range(lo, hi))
+
+
+def ts_snippets(
+    repo: Path, base_branch: str, evidence: list[str] | tuple[str, ...], max_items: int
+) -> list[str]:
+    """TS/JS evidence: the changed definition (merge-base vs. the branch, the
+    wrapped definition for a ``via`` wrapper) and the other branch's call site."""
+    import difflib
+
+    out: list[str] = []
+    for line in evidence:
+        if len(out) >= max_items:
+            break
+        m = _EVIDENCE_CALL.match(line)
+        if not m or not (ts_symbols.is_ts(m["def_path"]) and ts_symbols.is_ts(m["call_path"])):
+            continue
+        name, changer, def_path = m["name"], m["changer"], m["def_path"]
+        caller, call_path, via = m["caller"], m["call_path"], m["via"]
+        try:
+            mb = git_service.merge_base(repo, base_branch, changer) or base_branch
+            old_src = git_service.show_file(repo, mb, def_path)
+            new_src = git_service.show_file(repo, changer, def_path)
+            call_src = git_service.show_file(repo, caller, call_path)
+            call_old = git_service.show_file(repo, mb, call_path)
+        except git_service.GitError:
+            continue
+        if new_src is None or call_src is None:
+            continue
+        target = via or name
+        diff = list(difflib.unified_diff(
+            ts_symbols.decl_lines(old_src or "", target), ts_symbols.decl_lines(new_src, target),
+            f"{def_path} {target} (merge-base)", f"{def_path} {target} ({changer})",
+            n=3, lineterm="",
+        ))[: MAX_SNIPPET_LINES + 2]
+        site = _ts_call_site(call_old, call_src, name)
+        if not diff or not site:
+            continue
+        parts = []
+        if via:
+            parts += [f"{name} on {changer} is a thin wrapper:",
+                      *ts_symbols.decl_lines(new_src, name)[:WRAPPER_SNIPPET_LINES]]
+        parts += [*diff, f"call site on {caller} ({call_path}):", site]
+        out.append(f"[TS: body changed; not checked statically] {line}\n" + "\n".join(parts))
+    return out
+
+
+WRAPPER_SNIPPET_LINES = 6

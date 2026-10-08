@@ -15,7 +15,7 @@ from typing import Any
 from app.config import settings
 
 # Bump when the risk-assessment system prompt or response schema changes.
-PROMPT_VERSION = "risk-v8"
+PROMPT_VERSION = "risk-v9"
 
 
 @dataclass

@@ -405,4 +405,4 @@ def test_empty_static_section_says_only_parameters_were_compared() -> None:
     assert "Static signature checks (exact, parameters only):" in prompt
     assert "return values and behaviour were NOT checked" in prompt
     assert "PARAMETERS only" in SYSTEM_PROMPT
-    assert cache.PROMPT_VERSION == "risk-v8"
+    assert cache.PROMPT_VERSION == "risk-v9"

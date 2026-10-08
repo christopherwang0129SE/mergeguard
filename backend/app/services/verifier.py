@@ -171,7 +171,7 @@ def _existing_test_example(repo: Path, base: str) -> str:
     return "(no existing tests)"
 
 
-_EVIDENCE_PATH = re.compile(r"\(([^()\s]+\.py)\)")
+_EVIDENCE_PATH = re.compile(r"\(([^()\s]+\.(?:py|[cm]?[jt]sx?))\)")
 
 
 def focus_paths(evidence: list[str] | tuple[str, ...]) -> list[str]:
