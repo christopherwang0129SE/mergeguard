@@ -62,5 +62,8 @@ export interface HealthResponse {
   nebius_ready: boolean;
   nebius_enabled: boolean;
   nebius_model: string | null;
+  model?: string | null;
+  provider?: string | null;
+  base_url?: string | null;
   tavily_ready: boolean;
 }

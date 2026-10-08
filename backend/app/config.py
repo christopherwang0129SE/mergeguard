@@ -10,9 +10,12 @@ class Settings(BaseSettings):
     # --- Nebius Token Factory (OpenAI-compatible chat completions) ---
     # Key comes only from the environment. Never hardcode it.
     nebius_api_key: str = ""
-    # Nemotron 3 Super is served in us-central1. See app/services/nemotron.py.
-    nebius_base_url: str = "https://api.tokenfactory.us-central1.nebius.com/v1/"
+    # Token Factory endpoint and model. Both can be overridden with
+    # NEBIUS_BASE_URL / NEBIUS_MODEL. See app/services/nemotron.py.
+    nebius_base_url: str = "https://api.tokenfactory.nebius.com/v1/"
     nebius_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    # Display name reported by /api/health.
+    nebius_provider: str = "Nebius Token Factory"
     # Set NEBIUS_ENABLED=false to force the pure-git scorer even when a key is set.
     nebius_enabled: bool = True
     # Single attempt. The OpenAI client is constructed with max_retries=0.

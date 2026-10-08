@@ -20,7 +20,7 @@ def _isolate_nebius_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         settings,
         "nebius_base_url",
-        "https://api.tokenfactory.us-central1.nebius.com/v1/",
+        "https://api.tokenfactory.nebius.com/v1/",
     )
 
 

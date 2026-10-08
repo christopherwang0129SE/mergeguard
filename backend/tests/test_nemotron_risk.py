@@ -34,7 +34,7 @@ def test_combine_scores_keeps_textual_overlap() -> None:
 def test_defaults_point_at_nemotron_on_token_factory() -> None:
     assert Settings.model_fields["nebius_model"].default == "nvidia/nemotron-3-super-120b-a12b"
     base_url = Settings.model_fields["nebius_base_url"].default
-    assert base_url == "https://api.tokenfactory.us-central1.nebius.com/v1/"
+    assert base_url == "https://api.tokenfactory.nebius.com/v1/"
     assert Settings.model_fields["nebius_enabled"].default is True
     assert Settings.model_fields["nebius_max_pairs"].default == 6
 
@@ -238,7 +238,7 @@ def test_complete_uses_token_factory_chat_completions(monkeypatch: pytest.Monkey
     assert got.risk_score == 12
     assert got.rationale == "Independent edits."
     assert captured["init"]["api_key"] == "test-key-not-real"
-    assert captured["init"]["base_url"] == "https://api.tokenfactory.us-central1.nebius.com/v1/"
+    assert captured["init"]["base_url"] == "https://api.tokenfactory.nebius.com/v1/"
     assert captured["init"]["max_retries"] == 0
     assert captured["init"]["timeout"] == 40.0
     created = captured["create"]
@@ -358,3 +358,16 @@ def test_analyze_api_keeps_existing_fields(repo: Path) -> None:
     assert health_body["status"] == "ok"
     assert health_body["nebius_ready"] is False
     assert health_body["nebius_model"] == "nvidia/nemotron-3-super-120b-a12b"
+
+
+def test_health_reports_model_and_provider() -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    body = TestClient(app).get("/api/health").json()
+    assert body["status"] == "ok"
+    assert body["model"] == "nvidia/nemotron-3-super-120b-a12b"
+    assert body["provider"] == "Nebius Token Factory"
+    assert body["base_url"] == "https://api.tokenfactory.nebius.com/v1/"
+    assert "nebius_api_key" not in body

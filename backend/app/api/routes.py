@@ -20,6 +20,9 @@ def health() -> dict:
         "nebius_ready": settings.nebius_ready,
         "nebius_enabled": settings.nebius_enabled,
         "nebius_model": settings.nebius_model,
+        "model": settings.nebius_model,
+        "provider": settings.nebius_provider,
+        "base_url": settings.nebius_base_url,
         "tavily_ready": settings.tavily_ready,
     }
 

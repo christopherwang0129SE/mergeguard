@@ -3,17 +3,11 @@
 One chat-completions call per branch pair. The API key is read from settings
 (``NEBIUS_API_KEY``); this module never embeds a key.
 
-Default base URL is the us-central1 Token Factory host, which is where
-``nvidia/nemotron-3-super-120b-a12b`` is served:
+Defaults: model ``nvidia/nemotron-3-super-120b-a12b`` on the Token Factory
+host ``https://api.tokenfactory.nebius.com/v1/``. Override with
+``NEBIUS_MODEL`` / ``NEBIUS_BASE_URL``.
 
 - https://nebius.com/services/token-factory/nemotron
-- https://github.com/nebius/token-factory-cookbook/blob/main/models/nemotron/nemotron3-super-120B.md
-- https://tokenfactory.nebius.com/model-catalog.md (region: us-central1)
-
-``https://api.studio.nebius.com/v1`` is the old AI Studio host. The generic
-docs host ``https://api.tokenfactory.nebius.com/v1/`` is a different region and
-does not list this model. Override with ``NEBIUS_BASE_URL`` if the deployment
-moves.
 """
 from __future__ import annotations
 

@@ -4,7 +4,7 @@
 Built for the **Nebius & Tavily Hackathon 2026**.
 
 Naive parallel development — whether by humans or a fleet of AI coding agents —
-collides. Nordvakt watches in-flight branches and works to **predict**, **prevent**,
+collides. MergeGuard watches in-flight branches and works to **predict**, **prevent**,
 and **resolve** merge conflicts before they cost anyone a day.
 
 ## The three agents
@@ -54,7 +54,7 @@ and set:
 | Variable | Role |
 |----------|------|
 | `NEBIUS_API_KEY` | Token Factory key. Never commit it. An empty key disables the model. |
-| `NEBIUS_BASE_URL` | Default `https://api.tokenfactory.us-central1.nebius.com/v1/`. That is the host on the [Nemotron Token Factory page](https://nebius.com/services/token-factory/nemotron) and in the [Nebius cookbook](https://github.com/nebius/token-factory-cookbook/blob/main/models/nemotron/nemotron3-super-120B.md). The model catalog lists `nvidia/nemotron-3-super-120b-a12b` in region `us-central1`. |
+| `NEBIUS_BASE_URL` | Default `https://api.tokenfactory.nebius.com/v1/` (Nebius Token Factory, OpenAI-compatible). |
 | `NEBIUS_MODEL` | Default `nvidia/nemotron-3-super-120b-a12b`. |
 | `NEBIUS_ENABLED` | `false` forces the git scorer even when a key is set. |
 | `NEBIUS_TIMEOUT_SECONDS` | One chat-completions attempt. The client does not retry. Default 40. |
@@ -94,7 +94,7 @@ backend/            FastAPI service
     main.py         entrypoint + CORS
     config.py       env-driven settings (Nebius/Tavily keys)
     schemas.py      API models
-    api/routes.py   /api/health, /api/analyze
+    api/routes.py   /api/health (status, model, provider), /api/analyze
     services/
       git_service.py  pure-git diff/branch helpers (subprocess)
       nemotron.py     Token Factory chat-completions client
