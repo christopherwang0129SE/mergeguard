@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     verify_min_score: float = 70.0
     # os.pathsep-separated extra roots where generated tests may run.
     verify_allowed_roots: str = ""
-    verify_max_attempts: int = 3
+    verify_max_attempts: int = 4
     # Seconds for one test-generation model call (reasoning + code).
     verify_llm_timeout_seconds: float = 150.0
     verify_timeout_seconds: float = 30.0

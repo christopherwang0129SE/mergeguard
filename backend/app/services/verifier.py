@@ -47,7 +47,7 @@ from app.services import cache, git_service, nemotron, prefilter
 from app.services.nemotron import NemotronError
 from app.services.usage import UsageMeter
 
-PROMPT_VERSION = "verify-v4"
+PROMPT_VERSION = "verify-v5"
 TEST_FILENAME = "test_mergeguard_intent.py"
 MAX_OUTPUT_CHARS = 4000
 MAX_FILE_CHARS = 5000
@@ -124,6 +124,11 @@ def repo_allowed(repo: Path) -> bool:
 
 
 def is_high_risk(pair: PairRisk) -> bool:
+    """Worth a verify run. A call site the static check proves no longer
+    matches a changed signature always qualifies: the test is the ground
+    truth, not the model score."""
+    if pair.static_breaks:
+        return True
     if pair.score_source != "model":
         return False
     if pair.level == "high" or pair.model_level == "high":
@@ -773,7 +778,9 @@ def verify_pair(
                 runs = _run_all(wt, pair, code)
                 last_code = code
                 own_ok = _run_ok(runs[0]) and _run_ok(runs[1])
-                if (own_ok and (confirming_tests(runs) or wt.merge_conflict)) or cached_test:
+                # A confirming test is evidence on its own: other generated tests
+                # that fail on their own branch are broken tests, not counter-evidence.
+                if confirming_tests(runs) or (own_ok and wt.merge_conflict) or cached_test:
                     break
                 if attempts >= max_attempts:
                     break
@@ -807,7 +814,21 @@ def verify_pair(
             own_ok = len(runs) >= 2 and _run_ok(runs[0]) and _run_ok(runs[1])
             run_m = next((r for r in runs if r.target == "merge"), None)
             confirming = confirming_tests(runs)
-            if not own_ok:
+            if confirming and run_m is not None and not run_m.timed_out:
+                status = "confirmed"
+                reason = (
+                    f"{len(confirming)} intent test(s) that pass on their own branch and "
+                    f"capture its change fail on the merge of A+B"
+                )
+                if not own_ok:
+                    discarded = sum(
+                        1 for r in runs[:2] for outcome in r.cases.values() if outcome != "passed"
+                    )
+                    reason += (
+                        f"; {discarded} generated test(s) that did not pass on their own "
+                        "branch were discarded"
+                    )
+            elif not own_ok:
                 bad = [r.target.upper() for r in runs[:2] if not _run_ok(r)]
                 status = "suspected"
                 reason = f"generated test does not pass on branch {' and '.join(bad)}"
@@ -815,12 +836,6 @@ def verify_pair(
                 status, reason = "suspected", "textual merge conflict: git merge --no-commit failed"
             elif run_m.timed_out:
                 status, reason = "error", "test timed out on the merge"
-            elif confirming:
-                status = "confirmed"
-                reason = (
-                    f"intent tests pass on A and on B; {len(confirming)} that capture a "
-                    f"branch's change fail on the merge of A+B"
-                )
             elif run_m.failed > 0:
                 status = "suspected"
                 reason = "merge only fails tests that pin unchanged base behaviour"

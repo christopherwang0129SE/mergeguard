@@ -58,6 +58,8 @@ def test_branch_b_total_type():
 '''
 
 WRONG_ON_A = GOOD_TEST.replace("== 6", "== 7")
+WRONG_ON_B = GOOD_TEST.replace("== 12", "== 99")
+BOTH_WRONG = WRONG_ON_A.replace("== 12", "== 99")
 
 
 @pytest.fixture()
@@ -167,9 +169,10 @@ def test_repair_round_fixes_a_test_that_fails_on_its_own_branch(
 ) -> None:
     prompts: list[str] = []
     monkeypatch.setattr(
-        "app.services.nemotron.complete", _scripted([WRONG_ON_A, GOOD_TEST], prompts)
+        "app.services.nemotron.complete", _scripted([WRONG_ON_B, GOOD_TEST], prompts)
     )
     result = verifier.verify_pair(vrepo, "main", _pair())
+    # The only test that could confirm (B's) was wrong on B: repair round.
     assert len(prompts) == 2
     assert "did not pass on its own branch" in prompts[1]
     assert "Your previous test" in prompts[1]
@@ -181,10 +184,10 @@ def test_suspected_when_test_fails_on_own_branch_after_all_attempts(
     vrepo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     prompts: list[str] = []
-    monkeypatch.setattr("app.services.nemotron.complete", _scripted([WRONG_ON_A], prompts))
+    monkeypatch.setattr("app.services.nemotron.complete", _scripted([BOTH_WRONG], prompts))
     result = verifier.verify_pair(vrepo, "main", _pair())
     assert result.status == "suspected"
-    assert "does not pass on branch A" in result.reason
+    assert "does not pass on branch A and B" in result.reason
     assert result.attempts == settings.verify_max_attempts
 
 
@@ -196,7 +199,7 @@ def test_suspected_when_merge_also_passes(vrepo: Path, monkeypatch: pytest.Monke
     assert result.reason == "generated test also passes on the merge"
     assert result.runs[-1].failed == 0
     # One sharpening round was attempted with the merge result as feedback.
-    assert len(prompts) == settings.verify_max_attempts == 3
+    assert len(prompts) == settings.verify_max_attempts == 4
     assert "does not exercise the interaction" in prompts[1]
 
 
@@ -451,7 +454,7 @@ def test_reasoning_overflow_retries_without_thinking_even_after_a_test_ran(
     def fake(prompt: str, **kwargs) -> str:
         seen.append(kwargs.get("extra_body"))
         if len(seen) == 1:
-            return LLMText(f"```python\n{WRONG_ON_A}```", 900, 300)
+            return LLMText(f"```python\n{BOTH_WRONG}```", 900, 300)
         if len(seen) == 2:
             raise NemotronError("model_error", "empty model response (finish_reason=length)", 2000, 16384)
         return LLMText(f"```python\n{GOOD_TEST}```", 900, 300)
@@ -568,3 +571,23 @@ def test_collection_error_detection_and_prompt_guidance(tmp_path: Path) -> None:
     run = _raw_run(tmp_path, "from not_on_this_branch import thing\n\n\ndef test_branch_b_x():\n    pass\n")
     assert run.errors == 1 and verifier._collection_error(run), run.output
     assert "inside that branch's test functions" in verifier.SYSTEM_PROMPT
+
+
+def test_confirming_test_counts_even_if_another_generated_test_is_broken(
+    vrepo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompts: list[str] = []
+    monkeypatch.setattr("app.services.nemotron.complete", _scripted([WRONG_ON_A], prompts))
+    result = verifier.verify_pair(vrepo, "main", _pair())
+    # A's test is wrong on A (a broken test, discarded); B's test passes on B,
+    # fails on the base and fails on the merge: that is the evidence.
+    assert result.status == "confirmed", result.reason
+    assert result.confirming_tests == ["test_branch_b_total_adds_ten"]
+    assert "1 generated test(s) that did not pass on their own branch were discarded" in result.reason
+    assert len(prompts) == 1
+
+
+def test_static_break_makes_a_pair_eligible_for_verify() -> None:
+    low = _pair(score_source="git", model_score=None, model_level=None, score=5.0, level="low")
+    assert not verifier.is_high_risk(low)
+    assert verifier.is_high_risk(low.model_copy(update={"static_breaks": ["f: call site ..."]}))
