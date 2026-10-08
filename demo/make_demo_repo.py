@@ -108,7 +108,7 @@ Run the tests with:
 
 CHECKOUT_DISCOUNT_CAP = '''"""Tiny checkout module: price x qty, discount, tax."""
 
-# Maximum discount in currency units, applied to the pre-tax subtotal.
+# ASSUMPTION: MAX_DISCOUNT is a cap on the PRE-TAX subtotal.
 MAX_DISCOUNT = 20.00
 
 
@@ -120,7 +120,7 @@ def line_total(price: float, qty: int) -> float:
 def apply_discount(subtotal: float, discount_pct: float) -> float:
     """Apply a percentage discount, capped at MAX_DISCOUNT.
 
-    # amount is the pre-tax subtotal; the cap is a fixed currency amount.
+    ASSUMPTION: subtotal is the PRE-TAX amount; the cap is pre-tax.
     """
     if discount_pct <= 0:
         return subtotal
@@ -194,7 +194,9 @@ def apply_tax(amount: float, tax_pct: float) -> float:
 def total(price: float, qty: int, discount_pct: float, tax_pct: float) -> float:
     """Full order total: tax first, then discount on the taxed amount.
 
-    # amount is the pre-tax subtotal; tax is applied before the discount.
+    CHANGE: tax is now applied BEFORE the discount, so apply_discount
+    receives the TAX-INCLUSIVE amount. Any discount cap or percentage that
+    was tuned for pre-tax amounts now applies to a larger base.
     """
     subtotal = line_total(price, qty)
     taxed = apply_tax(subtotal, tax_pct)
@@ -280,7 +282,9 @@ def create_repo() -> None:
     write(DEMO_DIR / "tests" / "test_discount_cap.py", TEST_DISCOUNT_CAP)
     git(DEMO_DIR, "add", "-A")
     git(DEMO_DIR, "commit", "-q", "-m",
-        "Cap the discount at a fixed amount on the pre-tax subtotal")
+        "Cap the discount at MAX_DISCOUNT on the pre-tax subtotal\n\n"
+        "ASSUMPTION: apply_discount receives the PRE-TAX subtotal; the cap\n"
+        "is defined on pre-tax amounts.")
 
     # feat/tax-before-discount
     git(DEMO_DIR, "checkout", "-q", "main")
@@ -289,7 +293,9 @@ def create_repo() -> None:
     write(DEMO_DIR / "tests" / "test_tax_order.py", TEST_TAX_ORDER)
     git(DEMO_DIR, "add", "-A")
     git(DEMO_DIR, "commit", "-q", "-m",
-        "Apply tax before the discount in total()")
+        "Apply tax before the discount in total()\n\n"
+        "CHANGE: tax is now applied BEFORE the discount, so apply_discount\n"
+        "receives the TAX-INCLUSIVE amount.")
 
     # docs/readme
     git(DEMO_DIR, "checkout", "-q", "main")

@@ -8,17 +8,21 @@ It is used by the dashboard's **Try demo repo** button and by the demo video.
 | Branch | Change |
 | --- | --- |
 | `main` | `checkout.py` (price × qty, discount, tax) + `python3 -m unittest` tests |
-| `feat/discount-cap` | Caps the discount at a fixed amount (`MAX_DISCOUNT = 20.00`), applied to the **pre-tax subtotal**. Touches only `apply_discount` (top of the file). |
-| `feat/tax-before-discount` | Applies tax **before** the discount in `total()` (bottom of the file). |
+| `feat/discount-cap` | Caps the discount at a fixed amount (`MAX_DISCOUNT = 20.00`), applied to the **pre-tax subtotal**. Touches only `apply_discount` (top of the file). Carries an explicit `ASSUMPTION: apply_discount receives the PRE-TAX subtotal` comment and docstring. |
+| `feat/tax-before-discount` | Applies tax **before** the discount in `total()` (bottom of the file). Carries an explicit `CHANGE: tax is now applied BEFORE the discount, so apply_discount receives the TAX-INCLUSIVE amount` comment and docstring. |
 | `docs/readme` | Harmless branch that only edits `README.md`. |
 
 Both feature branches change the **same file** (`checkout.py`) but in far-apart
-regions (more than the 3-line adjacency window the Sentinel uses). So:
+regions (more than the 3-line adjacency window the Sentinel uses), so the merge
+has **no textual conflict** (`overlapping_files=0`). The clash is purely
+semantic: the two branches make opposite assumptions about what
+`apply_discount` receives. So:
 
 - **git heuristic**: 1 shared file, 0 overlapping regions → low risk (~10/100).
-- **Nemotron**: sees both changes in the shared-file diff excerpt → flags the
-  semantic clash (the discount cap assumes a pre-tax subtotal, while the other
-  branch taxes before discounting).
+- **Nemotron**: sees both changes (with the surrounding function context) and
+  the explicit ASSUMPTION/CHANGE comments → flags the semantic clash (the
+  discount cap assumes a pre-tax subtotal, while the other branch taxes before
+  discounting).
 
 Each branch passes its tests on its own. After merging both branches (no
 textual conflict) the result is wrong and at least one test fails.
