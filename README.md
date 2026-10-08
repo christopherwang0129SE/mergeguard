@@ -156,6 +156,54 @@ Safety:
   `exec`, `os.system` and similar is rejected before it runs.
 - Send `"verify": false` to skip it for a request.
 
+## Real-world case
+
+A real semantic merge conflict from a public repo, replayed end to end:
+[pymc-labs/daimon](https://github.com/pymc-labs/daimon) (MIT, Python).
+
+| | |
+| --- | --- |
+| Branch A | [PR #14](https://github.com/pymc-labs/daimon/pull/14) `feat/sync-fixes`, head [`1c4f6104`](https://github.com/pymc-labs/daimon/commit/1c4f61047aaff750c70b358209a3196715f42c0f). Adds two **required** fields, `slack_user_tokens` and `slack_turn_contexts`, to the pydantic model `PurgePreview` (`packages/core/daimon/core/privacy.py`) and updates every fixture that existed on its base. |
+| Branch B | [PR #17](https://github.com/pymc-labs/daimon/pull/17) `fix/deploy-review-findings`, head [`7175c4d3`](https://github.com/pymc-labs/daimon/commit/7175c4d315ef8033d15afc8206249a1bd18991c4). Adds `packages/adapters/discord/tests/test_branding.py`, whose `_make_preview()` builds a `PurgePreview` with the old field set (imported through a re-export in `privacy_panel/state.py`). |
+| Base | merge-base [`1933b244`](https://github.com/pymc-labs/daimon/commit/1933b2444b2d6e8ec1ee739d0d0109571d27406e) |
+| Upstream | Both heads were green in CI (incl. `pytest-discord`). #17 merged 2026-07-27 01:35, #14 merged 03:07 (Copenhagen time). The merge commit [`dcec264b`](https://github.com/pymc-labs/daimon/commit/dcec264bdb0d5dbd57fc169d1033ed86b97c512c) failed [`pytest-discord`](https://github.com/pymc-labs/daimon/actions/runs/30229050079/job/89864379877) until [`239fdb55`](https://github.com/pymc-labs/daimon/commit/239fdb55ac47a9e655291b896f25807d7efd48be) (03:09) added the two fields to the fixture: *"Semantic merge conflict ... neither branch's CI saw the other."* |
+
+Replay it locally (clones at pinned SHAs into `demo/real-case-1/`, gitignored;
+needs `uv` and network once for the project venv; no Postgres needed):
+
+```bash
+python3 demo/replay_case_1.py --prove
+```
+
+What `--prove` shows (`pytest packages/adapters/discord/tests -k "branding or privacy_panel or purge"`):
+
+| Checkout | Result |
+| --- | --- |
+| merge-base `1933b244` | 71 passed |
+| A (`pr-14-sync-fixes`) | 71 passed |
+| B (`pr-17-deploy-review-findings`) | 90 passed |
+| `git merge --no-commit` B into A | "Automatic merge went well" (0 files changed by both PRs) |
+| A+B | **2 failed**, 88 passed (`test_branding.py`: pydantic `ValidationError`, `slack_user_tokens` / `slack_turn_contexts` *Field required*) |
+| A+B + upstream fix `239fdb55` | 90 passed |
+
+What MergeGuard reported on `demo/real-case-1` (one fresh run, `use_cache=false`):
+
+- **Prefilter**: candidate (0 shared files). Top evidence: `PurgePreview: changed by pr-14-sync-fixes (packages/core/daimon/core/privacy.py), called by pr-17-deploy-review-findings (packages/adapters/discord/tests/test_branding.py)`, labelled *breaking signature change: new required slack_user_tokens, slack_turn_contexts; call site does not pass new required ...*.
+- **Nemotron**: 85/100, high (git heuristic: 0). It also claims that a `create_session` change breaks `bot.py`; the static evidence shows that call site does not pass the removed parameter, so that part of the rationale is wrong.
+- **Verify-by-test**: **confirmed** on the first attempt. `test_branch_b_make_preview` (calls B's `_make_preview()`) passes on B, fails on the merge-base (module absent) and fails on A+B with the same `ValidationError` as upstream CI. Shown as **90 High** (raised: confirmed by test; blend 42.5).
+- **Cost**: 2 LLM calls, 21,692 tokens, $0.0095 est., 53.8 s.
+
+Nemotron output is not fully deterministic: earlier development runs on the same
+case scored 85-88 and twice produced a test that did not pass on its own branch
+(verdict *suspected*). Getting here took three general engine fixes, each with
+tests: the prefilter now counts a changed class field as a constructor change
+and follows re-exports (before, it found only `create_session`, `on_message`,
+`on_submit`, `purge_account` and missed `PurgePreview`); the risk prompt now
+fits the diff excerpt into the budget instead of dropping it whole and leads
+with the changed definition and the other branch's call site (before: 45-48,
+medium, not verified); and verify-by-test runs the repo's own `.venv` with
+editable installs redirected to each worktree.
+
 ## Tests
 
 ```bash
