@@ -152,6 +152,27 @@ export const isDisagree = (pair: {
   );
 };
 
+/**
+ * The level a pair actually presents: the published level, raised to the
+ * model's level when the pair is a hidden conflict (the model flagged a
+ * medium/high semantic clash the git heuristic missed, so the published
+ * blended score understates the risk). Used by the summary bar and the
+ * branch lights.
+ */
+export const effectivePairLevel = (pair: {
+  level: RiskLevel;
+  score_source?: 'model' | 'git';
+  model_level?: RiskLevel | null;
+  git_score?: number | null;
+}): RiskLevel => {
+  if (isHiddenConflict(pair)) {
+    return levelRank(pair.model_level as RiskLevel) > levelRank(pair.level)
+      ? (pair.model_level as RiskLevel)
+      : pair.level;
+  }
+  return pair.level;
+};
+
 export const getBranchRiskLevel = (
   branch: string,
   pairs: PairRisk[]
@@ -164,7 +185,9 @@ export const getBranchRiskLevel = (
     return 'none';
   }
 
-  const levels: RiskLevel[] = relevantPairs.map((pair) => pair.level);
+  const levels: RiskLevel[] = relevantPairs.map((pair) =>
+    effectivePairLevel(pair)
+  );
   const maxLevel = levels.reduce((max, level) =>
     levelRank(level) > levelRank(max) ? level : max
   , 'none');

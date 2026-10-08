@@ -42,4 +42,34 @@ describe('BranchLights', () => {
     render(<BranchLights branches={[]} pairs={[]} />);
     expect(screen.getByText(/no branches/i)).toBeInTheDocument();
   });
+
+  it('raises the light for a hidden conflict (model level above the published level)', () => {
+    // Published level is low (blended score), but Nemotron flags a hidden
+    // high conflict -> both branches must show High.
+    const pairs: PairRisk[] = [
+      {
+        branch_a: 'feat/discount-cap',
+        branch_b: 'feat/tax-before-discount',
+        score: 40,
+        level: 'low',
+        shared_files: 1,
+        overlapping_files: 0,
+        collisions: [],
+        rationale: 'model rationale',
+        score_source: 'model',
+        git_score: 10,
+        model_score: 70,
+        model_level: 'high',
+        fallback_reason: null,
+      },
+    ];
+    render(
+      <BranchLights
+        branches={['feat/discount-cap', 'feat/tax-before-discount']}
+        pairs={pairs}
+      />
+    );
+    expect(screen.getByText(/feat\/discount-cap: High/i)).toBeInTheDocument();
+    expect(screen.getByText(/feat\/tax-before-discount: High/i)).toBeInTheDocument();
+  });
 });

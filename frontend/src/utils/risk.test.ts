@@ -10,6 +10,7 @@ import {
   isHiddenConflict,
   isDisagree,
   levelRank,
+  effectivePairLevel,
 } from './risk'
 import type { PairRisk, RiskLevel } from '../types'
 
@@ -252,6 +253,55 @@ describe('risk utils', () => {
     })
   })
 
+  describe('effectivePairLevel', () => {
+    it('returns the published level when there is no hidden conflict', () => {
+      expect(
+        effectivePairLevel({
+          level: 'medium',
+          score_source: 'model',
+          model_level: 'medium',
+          git_score: 50,
+        })
+      ).toBe('medium')
+      expect(
+        effectivePairLevel({
+          level: 'high',
+          score_source: 'git',
+          git_score: 80,
+        })
+      ).toBe('high')
+    })
+    it('returns the model level for a hidden conflict (model above git)', () => {
+      // git low (10) but Nemotron says high -> the pair is effectively high.
+      expect(
+        effectivePairLevel({
+          level: 'low',
+          score_source: 'model',
+          model_level: 'high',
+          git_score: 10,
+        })
+      ).toBe('high')
+      expect(
+        effectivePairLevel({
+          level: 'low',
+          score_source: 'model',
+          model_level: 'medium',
+          git_score: 0,
+        })
+      ).toBe('medium')
+    })
+    it('does not raise the level when the model is below the git level', () => {
+      expect(
+        effectivePairLevel({
+          level: 'high',
+          score_source: 'model',
+          model_level: 'low',
+          git_score: 80,
+        })
+      ).toBe('high')
+    })
+  })
+
   describe('getBranchRiskLevel', () => {
     it('returns none for branch with no pairs', () => {
       expect(getBranchRiskLevel('main', [])).toBe('none')
@@ -267,6 +317,25 @@ describe('risk utils', () => {
       expect(getBranchRiskLevel('feature/c', pairs)).toBe('high')
       expect(getBranchRiskLevel('feature/d', pairs)).toBe('medium')
       expect(getBranchRiskLevel('main', pairs)).toBe('none')
+    })
+    it('counts hidden conflicts: the light is the max of the published level and the model level of its hidden pairs', () => {
+      // Published level is low (blended score), but Nemotron flags a hidden
+      // high conflict on this branch's pair -> the light must be high.
+      const pairs: PairRisk[] = [
+        {
+          ...mockPair,
+          branch_a: 'feature/a',
+          branch_b: 'feature/b',
+          score: 40,
+          level: 'low',
+          score_source: 'model',
+          git_score: 10,
+          model_score: 70,
+          model_level: 'high',
+        },
+      ]
+      expect(getBranchRiskLevel('feature/a', pairs)).toBe('high')
+      expect(getBranchRiskLevel('feature/b', pairs)).toBe('high')
     })
   })
 

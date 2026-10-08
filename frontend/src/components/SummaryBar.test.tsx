@@ -127,4 +127,106 @@ describe('SummaryBar', () => {
       screen.getByText('Nemotron disagrees on 1 pair(s)')
     ).toBeInTheDocument()
   })
+
+  it('reports hidden conflicts when no pair is published medium/high (amber)', () => {
+    // git none (0) -> model medium (45): published 22.5 = low, but the model
+    // level is medium and above the git level -> hidden conflict.
+    const pairs = [
+      pair('feat/discount-cap', 'feat/tax-before-discount', 22.5, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 45,
+        model_level: 'medium',
+      }),
+      pair('docs/readme', 'feat/tax-before-discount', 5, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 10,
+        model_level: 'low',
+      }),
+      pair('docs/readme', 'feat/discount-cap', 2.5, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 5,
+        model_level: 'low',
+      }),
+    ]
+    render(<SummaryBar pairs={pairs} />)
+    expect(screen.getByText('1 hidden conflict among 3 pairs')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveStyle({ borderLeftColor: '#f59e0b' })
+  })
+
+  it('pluralizes hidden conflicts', () => {
+    const pairs = [
+      pair('a', 'b', 22.5, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 45,
+        model_level: 'medium',
+      }),
+      pair('c', 'd', 35, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 70,
+        model_level: 'high',
+      }),
+      pair('e', 'f', 5, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 10,
+        model_level: 'low',
+      }),
+    ]
+    render(<SummaryBar pairs={pairs} />)
+    expect(screen.getByText('2 hidden conflicts among 3 pairs')).toBeInTheDocument()
+  })
+
+  it('uses red for a hidden high conflict', () => {
+    const pairs = [
+      pair('a', 'b', 35, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 70,
+        model_level: 'high',
+      }),
+      pair('c', 'd', 5, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 10,
+        model_level: 'low',
+      }),
+    ]
+    render(<SummaryBar pairs={pairs} />)
+    expect(screen.getByText('1 hidden conflict among 2 pairs')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveStyle({ borderLeftColor: '#ef4444' })
+  })
+
+  it('appends the hidden count when shown medium/high pairs exist', () => {
+    const pairs = [
+      // Shown medium, model agrees with git -> not hidden.
+      pair('a', 'b', 50, 'medium', {
+        score_source: 'model',
+        git_score: 50,
+        model_score: 50,
+        model_level: 'medium',
+      }),
+      // Hidden: git none -> model medium, published low.
+      pair('c', 'd', 22.5, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 45,
+        model_level: 'medium',
+      }),
+      pair('e', 'f', 5, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 10,
+        model_level: 'low',
+      }),
+    ]
+    render(<SummaryBar pairs={pairs} />)
+    expect(
+      screen.getByText('2 of 3 branch pairs at medium risk · 1 hidden')
+    ).toBeInTheDocument()
+  })
 })
