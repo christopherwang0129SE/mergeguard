@@ -1,5 +1,6 @@
 import {
   levelToColor,
+  levelToTextColor,
   levelToText,
   sortPairsByScoreDesc,
   isFloorRule,
@@ -77,7 +78,7 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
                       aria-hidden="true"
                     ></span>
                     <span className="risk-number">Risk {Math.round(pair.score)} / 100</span>{' '}
-                    <span className="level-word" style={{ color: levelToColor(pair.level) }}>
+                    <span className="level-word" style={{ color: levelToTextColor(pair.level) }}>
                       {levelToText(pair.level)}
                     </span>
                   </td>

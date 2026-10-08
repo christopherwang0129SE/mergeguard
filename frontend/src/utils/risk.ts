@@ -14,6 +14,24 @@ export const levelToColor = (level: RiskLevel): string => {
   }
 };
 
+/**
+ * Text color for the risk level word. Darker than the dot colors so the
+ * word keeps enough contrast on white (spec: #B91C1C / #B45309 / #047857).
+ */
+export const levelToTextColor = (level: RiskLevel): string => {
+  switch (level) {
+    case 'none':
+    case 'low':
+      return '#047857'; // green-700
+    case 'medium':
+      return '#b45309'; // amber-700
+    case 'high':
+      return '#b91c1c'; // red-700
+    default:
+      return '#4b5563'; // gray-600
+  }
+};
+
 export const levelToText = (level: RiskLevel): string => {
   switch (level) {
     case 'none':

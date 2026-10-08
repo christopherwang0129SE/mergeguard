@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   levelToColor,
+  levelToTextColor,
   levelToText,
   getBranchRiskLevel,
   sortPairsByScoreDesc,
@@ -44,6 +45,15 @@ describe('risk utils', () => {
     it('returns gray for unknown', () => {
       // @ts-ignore
       expect(levelToColor('unknown' as RiskLevel)).toBe('#6b7280')
+    })
+  })
+
+  describe('levelToTextColor', () => {
+    it('uses darker text colors for the level word', () => {
+      expect(levelToTextColor('none')).toBe('#047857')
+      expect(levelToTextColor('low')).toBe('#047857')
+      expect(levelToTextColor('medium')).toBe('#b45309')
+      expect(levelToTextColor('high')).toBe('#b91c1c')
     })
   })
 
