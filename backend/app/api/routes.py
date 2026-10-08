@@ -18,6 +18,8 @@ def health() -> dict:
     return {
         "status": "ok",
         "nebius_ready": settings.nebius_ready,
+        "nebius_enabled": settings.nebius_enabled,
+        "nebius_model": settings.nebius_model,
         "tavily_ready": settings.tavily_ready,
     }
 

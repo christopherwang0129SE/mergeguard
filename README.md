@@ -11,7 +11,7 @@ and **resolve** merge conflicts before they cost anyone a day.
 
 | Agent | Role | Status |
 |-------|------|--------|
-| **Sentinel** | *Predict* — scores conflict risk between every pair of in-flight branches by diffing them at the region (and, later, symbol) level. | ✅ MVP |
+| **Sentinel** | *Predict* — scores conflict risk between every pair of in-flight branches from git hunk overlap, then optionally refines the riskiest pairs with NVIDIA Nemotron on Nebius Token Factory. | ✅ MVP |
 | **Planner** | *Prevent* — decomposes work into non-overlapping "zones" and suggests merge/rebase order. | ⏳ planned |
 | **Merger** | *Resolve* — semantic 3-way merge; uses **Tavily** to check current library docs, runs tests, explains the resolution. | ⏳ planned |
 
@@ -42,6 +42,41 @@ curl -s -X POST http://localhost:8000/api/analyze \
 Returns a per-branch diff summary and a ranked list of branch-pair **conflict-risk
 scores** with human-readable rationales.
 
+### Nemotron risk refinement
+
+With no API key, Sentinel is unchanged: each pair's `score`, `level`, and
+`rationale` come from git hunk overlap (including a 3-line adjacency window).
+The response adds `score_source: "git"` and `fallback_reason: "no_api_key"`.
+
+To ask NVIDIA Nemotron 3 Super as well, copy `.env.example` to `backend/.env`
+and set:
+
+| Variable | Role |
+|----------|------|
+| `NEBIUS_API_KEY` | Token Factory key. Never commit it. An empty key disables the model. |
+| `NEBIUS_BASE_URL` | Default `https://api.tokenfactory.us-central1.nebius.com/v1/`. That is the host on the [Nemotron Token Factory page](https://nebius.com/services/token-factory/nemotron) and in the [Nebius cookbook](https://github.com/nebius/token-factory-cookbook/blob/main/models/nemotron/nemotron3-super-120B.md). The model catalog lists `nvidia/nemotron-3-super-120b-a12b` in region `us-central1`. |
+| `NEBIUS_MODEL` | Default `nvidia/nemotron-3-super-120b-a12b`. |
+| `NEBIUS_ENABLED` | `false` forces the git scorer even when a key is set. |
+| `NEBIUS_TIMEOUT_SECONDS` | One chat-completions attempt. The client does not retry. Default 40. |
+| `NEBIUS_MAX_PAIRS` | Cap on model calls per `/api/analyze`. The highest git scores are sent first. Default 6. |
+
+For each selected pair the model receives a bounded prompt: both branches'
+changed files, overlapping or adjacent hunks, a trimmed diff excerpt, and a
+few recent commit subjects. It must reply with JSON
+`{"risk_score", "risk_level", "rationale"}`.
+
+The published `score` is `0.5 * git_score + 0.5 * risk_score`. If the hunks
+overlap, that blend cannot drop below the git score. `level` follows the
+published score (high ≥ 70, medium ≥ 40, low > 0). `score_source` is `"model"`,
+`rationale` is the model's rationale, and `git_score` / `git_rationale` keep
+the heuristic. `risk_model` on the response is the model id when any pair used
+it.
+
+If the call errors, times out, or returns something that is not that JSON, the
+pair keeps the git score, `score_source` stays `"git"`, and `fallback_reason`
+is `"model_error"` or `"unparsable"`. Pairs past the cap use `"pair_cap"`.
+`NEBIUS_ENABLED=false` uses `"disabled"`. The HTTP request still succeeds.
+
 ## Tests
 
 ```bash
@@ -62,7 +97,8 @@ backend/            FastAPI service
     api/routes.py   /api/health, /api/analyze
     services/
       git_service.py  pure-git diff/branch helpers (subprocess)
-      sentinel.py     conflict-risk scoring
+      nemotron.py     Token Factory chat-completions client
+      sentinel.py     conflict-risk scoring (git, optional Nemotron blend)
   tests/
 frontend/           dashboard (to be scaffolded)
 docs/               customer discovery + notes

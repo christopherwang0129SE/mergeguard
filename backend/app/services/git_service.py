@@ -116,3 +116,38 @@ def diff_against_base(repo: Path, branch: str, base: str) -> BranchDiff:
             )
         )
     return BranchDiff(branch=branch, base=base, merge_base=mb, ahead=ahead, files=files)
+
+
+def recent_commit_subjects(repo: Path, branch: str, limit: int = 5) -> list[str]:
+    """Short ``hash subject`` lines for ``branch``, newest first."""
+    count = max(0, limit)
+    if count == 0:
+        return []
+    out = _run(repo, "log", f"-n{count}", "--format=%h %s", branch)
+    subjects: list[str] = []
+    for line in out.splitlines():
+        text = " ".join(line.split())
+        if not text:
+            continue
+        if len(text) > 120:
+            text = text[:117].rstrip() + "..."
+        subjects.append(text)
+    return subjects
+
+
+def trimmed_diff(
+    repo: Path,
+    branch: str,
+    base: str,
+    paths: list[str],
+    max_chars: int,
+) -> str:
+    """Unified diff excerpt for ``paths`` on ``branch`` vs the merge-base with ``base``."""
+    if not paths or max_chars <= 0:
+        return ""
+    mb = merge_base(repo, base, branch)
+    ref = f"{mb}..{branch}" if mb else f"{base}..{branch}"
+    text = _run(repo, "diff", "--no-color", "-U1", ref, "--", *paths)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n...(trimmed)\n"

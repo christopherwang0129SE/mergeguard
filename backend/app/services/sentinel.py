@@ -3,25 +3,41 @@
 Given a repo and a set of branches, each branch is diffed against the merge-base
 with the integration branch. For every branch *pair* we look at the files both
 touch, and within those files whether their changed line-ranges overlap or sit
-close together. That yields a 0-100 risk score with an explainable rationale.
+close together. That yields a 0-100 git risk score with an explainable rationale.
 
-This is intentionally dependency-free (pure git). Symbol/AST-level overlap is a
-planned upgrade that plugs into `_file_collision`.
+When Nebius is configured (``NEBIUS_API_KEY`` set and ``NEBIUS_ENABLED``), the
+highest-scoring pairs — up to ``NEBIUS_MAX_PAIRS`` — are also sent to NVIDIA
+Nemotron on Token Factory. The published score is an equal blend of the git
+score and the model's ``risk_score``. If the hunks overlap, the blend cannot
+fall below the git score: the model may raise a textual collision, not dismiss
+it. When they do not overlap, the blend can move either way so a semantic clash
+the diff heuristic missed can still raise the score.
+
+If the key is missing, the model is disabled, the call errors or times out, or
+the reply is not a usable JSON assessment, that pair keeps the git score and
+``fallback_reason`` says why. A model failure never fails the request.
 """
 from __future__ import annotations
 
 from itertools import combinations
 from pathlib import Path
 
+from app.config import settings
 from app.schemas import (
     AnalyzeResponse,
     BranchDiff,
     ChangedFile,
+    FallbackReason,
     FileCollision,
     PairRisk,
     RiskLevel,
 )
 from app.services import git_service
+from app.services.nemotron import (
+    NemotronError,
+    assess_pair,
+    build_pair_prompt,
+)
 
 # Two changed regions within this many lines of each other are treated as
 # colliding — git conflicts arise from adjacency, not just exact overlap.
@@ -55,6 +71,15 @@ def _level(score: float) -> RiskLevel:
     if score > 0:
         return "low"
     return "none"
+
+
+def combine_scores(git_score: float, model_score: float, overlapping_files: int) -> float:
+    """Blend the git hunk score with the model score. See the module docstring."""
+    blended = (0.5 * git_score) + (0.5 * model_score)
+    if overlapping_files > 0:
+        blended = max(git_score, blended)
+    blended = min(max(blended, 0.0), 100.0)
+    return round(blended, 1)
 
 
 def _score_pair(diff_a: BranchDiff, diff_b: BranchDiff) -> PairRisk:
@@ -101,7 +126,104 @@ def _score_pair(diff_a: BranchDiff, diff_b: BranchDiff) -> PairRisk:
         overlapping_files=overlapping,
         collisions=[c for c in collisions if c.overlapping] or collisions,
         rationale=rationale,
+        score_source="git",
+        git_score=score,
+        git_rationale=rationale,
     )
+
+
+def _model_skip_reason() -> FallbackReason | None:
+    if not settings.nebius_enabled:
+        return "disabled"
+    if not settings.nebius_api_key.strip():
+        return "no_api_key"
+    return None
+
+
+def _commits(repo: Path, branch: str) -> list[str]:
+    try:
+        return git_service.recent_commit_subjects(repo, branch, limit=5)
+    except git_service.GitError:
+        return []
+
+
+def _excerpt(repo: Path, base_branch: str, pair: PairRisk) -> str:
+    paths = [c.path for c in pair.collisions if c.overlapping] or [
+        c.path for c in pair.collisions
+    ]
+    paths = paths[:3]
+    if not paths:
+        return ""
+    chunks: list[str] = []
+    for branch in (pair.branch_a, pair.branch_b):
+        try:
+            text = git_service.trimmed_diff(
+                repo, branch, base_branch, paths, max_chars=1100
+            )
+        except git_service.GitError:
+            text = ""
+        if text.strip():
+            chunks.append(f"--- {branch} ---\n{text.strip()}")
+    return "\n".join(chunks)
+
+
+def _refine_one(
+    repo: Path,
+    base_branch: str,
+    diff_by_branch: dict[str, BranchDiff],
+    pair: PairRisk,
+) -> PairRisk:
+    diff_a = diff_by_branch[pair.branch_a]
+    diff_b = diff_by_branch[pair.branch_b]
+    try:
+        prompt = build_pair_prompt(
+            base_branch=base_branch,
+            pair=pair,
+            diff_a=diff_a,
+            diff_b=diff_b,
+            commits_a=_commits(repo, pair.branch_a),
+            commits_b=_commits(repo, pair.branch_b),
+            excerpt=_excerpt(repo, base_branch, pair),
+        )
+        assessment = assess_pair(prompt)
+    except NemotronError as exc:
+        reason: FallbackReason = "unparsable" if exc.code == "unparsable" else "model_error"
+        return pair.model_copy(update={"fallback_reason": reason})
+    except Exception:
+        return pair.model_copy(update={"fallback_reason": "model_error"})
+
+    git_score = pair.git_score if pair.git_score is not None else pair.score
+    published = combine_scores(git_score, assessment.risk_score, pair.overlapping_files)
+    model_level = assessment.risk_level or _level(assessment.risk_score)
+    return pair.model_copy(
+        update={
+            "score": published,
+            "level": _level(published),
+            "rationale": assessment.rationale,
+            "score_source": "model",
+            "model_score": assessment.risk_score,
+            "model_level": model_level,
+            "model_rationale": assessment.rationale,
+            "fallback_reason": None,
+        }
+    )
+
+
+def _refine_with_model(
+    repo: Path,
+    base_branch: str,
+    diff_by_branch: dict[str, BranchDiff],
+    pairs: list[PairRisk],
+) -> list[PairRisk]:
+    """Call the model for the top ``nebius_max_pairs`` pairs by git score."""
+    limit = max(0, int(settings.nebius_max_pairs))
+    refined: list[PairRisk] = []
+    for index, pair in enumerate(pairs):
+        if index >= limit:
+            refined.append(pair.model_copy(update={"fallback_reason": "pair_cap"}))
+            continue
+        refined.append(_refine_one(repo, base_branch, diff_by_branch, pair))
+    return refined
 
 
 def analyze(
@@ -117,9 +239,18 @@ def analyze(
         pairs.append(_score_pair(diff_by_branch[a], diff_by_branch[b]))
     pairs.sort(key=lambda p: p.score, reverse=True)
 
+    skip = _model_skip_reason()
+    if skip:
+        pairs = [pair.model_copy(update={"fallback_reason": skip}) for pair in pairs]
+    else:
+        pairs = _refine_with_model(repo, base_branch, diff_by_branch, pairs)
+        pairs.sort(key=lambda p: p.score, reverse=True)
+
+    risk_model = settings.nebius_model if any(p.score_source == "model" for p in pairs) else None
     return AnalyzeResponse(
         base_branch=base_branch,
         branches=branches,
         diffs=diffs,
         pairs=pairs,
+        risk_model=risk_model,
     )

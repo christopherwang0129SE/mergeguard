@@ -7,10 +7,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # --- Nebius Token Factory (OpenAI-compatible endpoint) ---
+    # --- Nebius Token Factory (OpenAI-compatible chat completions) ---
+    # Key comes only from the environment. Never hardcode it.
     nebius_api_key: str = ""
-    nebius_base_url: str = "https://api.studio.nebius.com/v1"
-    nebius_model: str = "Qwen/Qwen2.5-72B-Instruct"
+    # Nemotron 3 Super is served in us-central1. See app/services/nemotron.py.
+    nebius_base_url: str = "https://api.tokenfactory.us-central1.nebius.com/v1/"
+    nebius_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    # Set NEBIUS_ENABLED=false to force the pure-git scorer even when a key is set.
+    nebius_enabled: bool = True
+    # Single attempt. The OpenAI client is constructed with max_retries=0.
+    nebius_timeout_seconds: float = 40.0
+    # Highest-risk pairs (by git score) that may receive a model call per request.
+    nebius_max_pairs: int = 6
 
     # --- Tavily (used later by the Resolver for doc lookups) ---
     tavily_api_key: str = ""
@@ -22,7 +30,7 @@ class Settings(BaseSettings):
 
     @property
     def nebius_ready(self) -> bool:
-        return bool(self.nebius_api_key)
+        return self.nebius_enabled and bool(self.nebius_api_key.strip())
 
     @property
     def tavily_ready(self) -> bool:

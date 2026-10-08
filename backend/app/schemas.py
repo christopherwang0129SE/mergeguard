@@ -46,6 +46,9 @@ class FileCollision(BaseModel):
 
 
 RiskLevel = Literal["none", "low", "medium", "high"]
+ScoreSource = Literal["model", "git"]
+# Why a pair kept the git score. Absent when `score_source` is `model`.
+FallbackReason = Literal["no_api_key", "disabled", "pair_cap", "model_error", "unparsable"]
 
 
 class PairRisk(BaseModel):
@@ -57,6 +60,15 @@ class PairRisk(BaseModel):
     overlapping_files: int
     collisions: list[FileCollision]
     rationale: str
+    # Additive. `score` / `level` / `rationale` stay the values to display.
+    # `score_source` says whether those came from Nemotron or the git heuristic.
+    score_source: ScoreSource = "git"
+    git_score: float | None = Field(default=None, ge=0, le=100)
+    git_rationale: str | None = None
+    model_score: float | None = Field(default=None, ge=0, le=100)
+    model_level: RiskLevel | None = None
+    model_rationale: str | None = None
+    fallback_reason: FallbackReason | None = None
 
 
 class AnalyzeResponse(BaseModel):
@@ -64,3 +76,5 @@ class AnalyzeResponse(BaseModel):
     branches: list[str]
     diffs: list[BranchDiff]
     pairs: list[PairRisk]
+    # Set when at least one pair's published score used the model.
+    risk_model: str | None = None

@@ -1,0 +1,319 @@
+"""NVIDIA Nemotron client for Nebius Token Factory.
+
+One chat-completions call per branch pair. The API key is read from settings
+(``NEBIUS_API_KEY``); this module never embeds a key.
+
+Default base URL is the us-central1 Token Factory host, which is where
+``nvidia/nemotron-3-super-120b-a12b`` is served:
+
+- https://nebius.com/services/token-factory/nemotron
+- https://github.com/nebius/token-factory-cookbook/blob/main/models/nemotron/nemotron3-super-120B.md
+- https://tokenfactory.nebius.com/model-catalog.md (region: us-central1)
+
+``https://api.studio.nebius.com/v1`` is the old AI Studio host. The generic
+docs host ``https://api.tokenfactory.nebius.com/v1/`` is a different region and
+does not list this model. Override with ``NEBIUS_BASE_URL`` if the deployment
+moves.
+"""
+from __future__ import annotations
+
+import json
+import math
+import re
+from dataclasses import dataclass
+
+from openai import OpenAI
+
+from app.config import settings
+from app.schemas import BranchDiff, ChangedFile, FileCollision, PairRisk, RiskLevel
+
+# Prompt budget. Excerpts are dropped before the structured summary is cut.
+MAX_PROMPT_CHARS = 7000
+MAX_EXCERPT_CHARS = 2400
+MAX_FILES = 12
+MAX_COLLISIONS = 8
+MAX_RATIONALE_CHARS = 500
+
+_LEVELS: set[str] = {"none", "low", "medium", "high"}
+
+SYSTEM_PROMPT = (
+    "You assess whether two in-flight git branches are likely to conflict or "
+    "break each other when both land on the same base branch. Use the git "
+    "heuristic as context, not as your answer: it only sees textual hunk "
+    "overlap. Also consider semantic clashes visible in the file list and "
+    "diff excerpt (incompatible edits to the same logic, signature changes "
+    "versus call sites). "
+    "Reply with one JSON object and no other text, using this shape: "
+    '{"risk_score": <number 0-100>, "risk_level": "none"|"low"|"medium"|"high", '
+    '"rationale": "<one or two sentences>"}. '
+    "0 means the branches do not interfere. 100 means a merge will almost "
+    "certainly conflict or invalidate the other branch's change."
+)
+
+
+class NemotronError(Exception):
+    """The model call failed or its output could not be used.
+
+    ``code`` is a stable fallback reason: ``model_error`` or ``unparsable``.
+    """
+
+    def __init__(self, code: str, detail: str = "") -> None:
+        self.code = code
+        self.detail = detail
+        super().__init__(detail or code)
+
+
+@dataclass(frozen=True)
+class ModelAssessment:
+    risk_score: float
+    rationale: str
+    risk_level: RiskLevel | None
+
+
+def _safe_detail(exc: BaseException) -> str:
+    text = str(exc)
+    key = settings.nebius_api_key.strip()
+    if key:
+        text = text.replace(key, "[redacted]")
+    text = " ".join(text.split())
+    return text[:180]
+
+
+def complete(user_prompt: str) -> str:
+    """Call Token Factory chat completions once. No retries."""
+    if not settings.nebius_api_key.strip():
+        raise NemotronError("model_error", "NEBIUS_API_KEY is empty")
+
+    client = OpenAI(
+        api_key=settings.nebius_api_key,
+        base_url=settings.nebius_base_url,
+        timeout=settings.nebius_timeout_seconds,
+        max_retries=0,
+    )
+    try:
+        completion = client.chat.completions.create(
+            model=settings.nebius_model,
+            temperature=0.1,
+            max_tokens=2048,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+    except NemotronError:
+        raise
+    except Exception as exc:
+        raise NemotronError("model_error", _safe_detail(exc)) from exc
+
+    if not completion.choices:
+        raise NemotronError("model_error", "empty model response")
+    content = completion.choices[0].message.content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                parts.append(str(part.get("text", "")))
+            else:
+                text = getattr(part, "text", "")
+                parts.append(str(text) if text else "")
+        content = "".join(parts)
+    if not isinstance(content, str) or not content.strip():
+        raise NemotronError("model_error", "empty model response")
+    return content
+
+
+def assess_pair(prompt: str) -> ModelAssessment:
+    """Score one branch pair. Raises ``NemotronError`` on any failure."""
+    return parse_assessment(complete(prompt))
+
+
+def parse_assessment(text: str) -> ModelAssessment:
+    """Parse a model reply into a risk assessment.
+
+    Accepts raw JSON, a fenced ```json block, or JSON after a <think> section.
+    """
+    data = _load_json_object(text)
+    if "risk_score" not in data or "rationale" not in data:
+        raise NemotronError("unparsable", "missing risk_score or rationale")
+
+    score = _coerce_score(data["risk_score"])
+    rationale = data["rationale"]
+    if not isinstance(rationale, str) or not rationale.strip():
+        raise NemotronError("unparsable", "empty rationale")
+    rationale = " ".join(rationale.split())
+    if len(rationale) > MAX_RATIONALE_CHARS:
+        rationale = rationale[: MAX_RATIONALE_CHARS - 3].rstrip() + "..."
+
+    level_raw = data.get("risk_level")
+    level: RiskLevel | None
+    if isinstance(level_raw, str) and level_raw.strip().lower() in _LEVELS:
+        level = level_raw.strip().lower()  # type: ignore[assignment]
+    else:
+        level = None
+    return ModelAssessment(risk_score=score, rationale=rationale, risk_level=level)
+
+
+def _coerce_score(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise NemotronError("unparsable", "risk_score is not a number")
+    try:
+        score = float(value)
+    except (TypeError, ValueError) as exc:
+        raise NemotronError("unparsable", "risk_score is not a number") from exc
+    if not math.isfinite(score):
+        raise NemotronError("unparsable", "risk_score is not finite")
+    return round(min(max(score, 0.0), 100.0), 1)
+
+
+def _load_json_object(text: str) -> dict:
+    cleaned = text.strip()
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = cleaned.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+
+    for candidate in (cleaned.strip(),):
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            return data
+
+    found = _first_json_object(cleaned)
+    if found is None:
+        raise NemotronError("unparsable", "response was not a JSON object")
+    return found
+
+
+def _first_json_object(text: str) -> dict | None:
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_string = False
+        escape = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    snippet = text[start : index + 1]
+                    try:
+                        data = json.loads(snippet)
+                    except json.JSONDecodeError:
+                        break
+                    if isinstance(data, dict):
+                        return data
+                    break
+        start = text.find("{", start + 1)
+    return None
+
+
+def _fmt_hunks(hunks: list[tuple[int, int]]) -> str:
+    if not hunks:
+        return "none"
+    shown = hunks[:8]
+    parts = [f"{start}-{end}" if start != end else str(start) for start, end in shown]
+    suffix = f" (+{len(hunks) - len(shown)} more)" if len(hunks) > len(shown) else ""
+    return ", ".join(parts) + suffix
+
+
+def _file_lines(files: list[ChangedFile]) -> list[str]:
+    shown = files[:MAX_FILES]
+    lines = [
+        f"- {item.path} +{item.added_lines}/-{item.removed_lines} hunks={_fmt_hunks(item.hunks)}"
+        for item in shown
+    ]
+    if len(files) > len(shown):
+        lines.append(f"- ... {len(files) - len(shown)} more files omitted")
+    return lines or ["- (no file changes)"]
+
+
+def _commit_lines(commits: list[str]) -> list[str]:
+    shown = commits[:5]
+    return [f"- {item}" for item in shown] or ["- (none)"]
+
+
+def _collision_lines(pair: PairRisk) -> list[str]:
+    shown: list[FileCollision] = list(pair.collisions[:MAX_COLLISIONS])
+    if not shown:
+        return ["- (none)"]
+    lines = [
+        (
+            f"- {col.path} overlapping={str(col.overlapping).lower()} "
+            f"{pair.branch_a} hunks={_fmt_hunks(col.branch_a_hunks)} "
+            f"{pair.branch_b} hunks={_fmt_hunks(col.branch_b_hunks)}"
+        )
+        for col in shown
+    ]
+    if len(pair.collisions) > len(shown):
+        lines.append(f"- ... {len(pair.collisions) - len(shown)} more files omitted")
+    return lines
+
+
+def build_pair_prompt(
+    *,
+    base_branch: str,
+    pair: PairRisk,
+    diff_a: BranchDiff,
+    diff_b: BranchDiff,
+    commits_a: list[str],
+    commits_b: list[str],
+    excerpt: str,
+) -> str:
+    """Bounded context for one pair: files, hunks, commit subjects, diff excerpt."""
+    git_score = pair.git_score if pair.git_score is not None else pair.score
+    sections = [
+        f"Base branch: {base_branch}",
+        f"Pair: {pair.branch_a} vs {pair.branch_b}",
+        (
+            "Git heuristic (textual hunk overlap and adjacency only): "
+            f"score={git_score} shared_files={pair.shared_files} "
+            f"overlapping_files={pair.overlapping_files}"
+        ),
+        f"Git rationale: {pair.git_rationale or pair.rationale}",
+        "",
+        f"Branch {pair.branch_a} (ahead {diff_a.ahead})",
+        "Recent commits:",
+        *_commit_lines(commits_a),
+        "Changed files:",
+        *_file_lines(diff_a.files),
+        "",
+        f"Branch {pair.branch_b} (ahead {diff_b.ahead})",
+        "Recent commits:",
+        *_commit_lines(commits_b),
+        "Changed files:",
+        *_file_lines(diff_b.files),
+        "",
+        "Shared or overlapping regions:",
+        *_collision_lines(pair),
+    ]
+    body = "\n".join(sections)
+
+    excerpt_text = excerpt.strip()
+    if len(excerpt_text) > MAX_EXCERPT_CHARS:
+        excerpt_text = excerpt_text[:MAX_EXCERPT_CHARS].rstrip() + "\n...(trimmed)"
+    if excerpt_text:
+        prompt = body + "\n\nDiff excerpts (trimmed):\n" + excerpt_text
+    else:
+        prompt = body + "\n\nDiff excerpts (trimmed):\n(none)"
+
+    if len(prompt) > MAX_PROMPT_CHARS:
+        prompt = body + "\n\nDiff excerpts (trimmed):\n(omitted; context budget)"
+    if len(prompt) > MAX_PROMPT_CHARS:
+        prompt = prompt[:MAX_PROMPT_CHARS].rstrip() + "\n...(trimmed)"
+    return prompt
