@@ -20,9 +20,10 @@ Cases (local repos under demo/, built if missing):
   (ThinkersJournal/KISS PR #311 x #315) and elastic
   (elastic/observability-migration-platform PR #381 x #383), built by
   demo/replay.py --case NAME; each PR pair is expected to be confirmed.
-  qwen-code (QwenLM/qwen-code PR #8947 x #8933) is TypeScript: verify-by-test
-  and the branch-tests stage are Python-only, so only the model triage is
-  measured.
+  qwen-code (QwenLM/qwen-code PR #8947 x #8933) is TypeScript: the
+  branch-tests stage runs its vitest files (shared npm install per lockfile,
+  only the workspace builds the tests need; the install and build seconds
+  are reported); verify-by-test (intent tests) is Python-only.
 
 Two confirmation layers are counted separately: "branch test" (the
 branches' own changed tests run on A+B, deterministic, no LLM) and "intent
@@ -90,7 +91,7 @@ CASES = [
          [sys.executable, str(DEMO / "replay.py"), "--case", "elastic"],
          {frozenset({"pr-381-nested-agg-counter-ts", "pr-383-nested-legend-inner-group"})},
          default=False),
-    # TypeScript: verify-by-test is Python-only, so this measures the triage alone.
+    # TypeScript: branch tests run vitest; intent tests (verify-by-test) are Python-only.
     Case("qwen-code", DEMO / "qwen-code",
          [sys.executable, str(DEMO / "replay.py"), "--case", "qwen-code", "--no-venv"],
          {frozenset({"pr-8947-acp-resource-guards", "pr-8933-restore-request-shapes"})},
@@ -113,6 +114,8 @@ class Row:
     tokens: int = 0
     usd: float = 0.0
     model_scores: list[float] = field(default_factory=list)
+    js_install_s: float = 0.0  # JS dependency installs (0 when reused from cache)
+    js_build_s: float = 0.0  # JS workspace builds
 
     def add(self, status: str) -> None:
         self.verdicts[status] = self.verdicts.get(status, 0) + 1
@@ -155,6 +158,9 @@ def _record(case: Case, res, elapsed: float, target: Row, harmless: Row) -> str:
         row.by_branch += "branch test" in layers
         row.by_intent += "intent test" in layers
         row.unsupported += bool(pair.unsupported_claims)
+        if pair.branch_tests is not None:
+            row.js_install_s += pair.branch_tests.install_s
+            row.js_build_s += pair.branch_tests.build_s
         if pair.model_score is not None:
             row.model_scores.append(pair.model_score)
         verdict = "confirmed by " + " + ".join(layers) if layers else "not confirmed"
@@ -172,9 +178,9 @@ def _finish(target: Row, harmless: Row) -> list[Row]:
 def _render(rows: list[Row], spent: float, budget: float | None, notes: list[str]) -> str:
     header = ("| case | runs | pairs | confirmed (either layer) | by branch test | "
               "by intent test | intent suspected | intent error | intent not verified | "
-              "branch-test statuses | unsupported claims | median time (s) | total tokens | "
-              "total $ |")
-    lines = [header, "|" + "---|" * 14]
+              "branch-test statuses | unsupported claims | median time (s) | "
+              "JS install / build (s, sum) | total tokens | total $ |")
+    lines = [header, "|" + "---|" * 15]
     for r in rows:
         v = r.verdicts
         shared = r.label.endswith("(harmless pairs)") and any(
@@ -186,7 +192,8 @@ def _render(rows: list[Row], spent: float, budget: float | None, notes: list[str
             f"| {r.label} | {r.runs} | {r.pairs} | {r.confirmed} | {r.by_branch} | "
             f"{r.by_intent} | {v.get('suspected', 0)} | {v.get('error', 0)} | "
             f"{v.get('not verified', 0) + v.get('skipped', 0)} | {statuses} | {r.unsupported} | "
-            f"{statistics.median(r.times):.1f} | {cost[0]} | {cost[1]} |"
+            f"{statistics.median(r.times):.1f} | {r.js_install_s:.1f} / {r.js_build_s:.1f} | "
+            f"{cost[0]} | {cost[1]} |"
         )
     harmless = [r for r in rows if r.label.endswith("(harmless pairs)")]
     if harmless:
