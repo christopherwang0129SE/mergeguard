@@ -64,11 +64,17 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
             {sortedPairs.map((pair) => {
               const floor = isFloorRule(pair);
               const hidden = isHiddenConflict(pair);
+              const confirmed = pair.verification?.status === 'confirmed';
               const [modelLine, floorLine] = floor ? floorRationale(pair) : ['', ''];
+              const rowClass = confirmed
+                ? 'row-confirmed'
+                : hidden
+                  ? 'row-hidden-conflict'
+                  : undefined;
               return (
                 <tr
                   key={`${pair.branch_a}-${pair.branch_b}`}
-                  className={hidden ? 'row-hidden-conflict' : undefined}
+                  className={rowClass}
                 >
                   <td className="branch-name">{pair.branch_a}</td>
                   <td className="branch-name">{pair.branch_b}</td>

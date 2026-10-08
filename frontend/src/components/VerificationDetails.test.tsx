@@ -87,7 +87,7 @@ describe('VerificationDetails', () => {
   })
 
   it('shows the raised score note in the level cell of a confirmed pair', () => {
-    render(
+    const { container } = render(
       <PairTable
         pairs={[
           pair({
@@ -95,6 +95,8 @@ describe('VerificationDetails', () => {
             level: 'high',
             blended_score: 47.5,
             score_note: 'raised: confirmed by test',
+            score_source: 'model',
+            model_level: 'high',
             verification: verification(),
           }),
         ]}
@@ -107,6 +109,10 @@ describe('VerificationDetails', () => {
     // Git and model columns stay as reported.
     expect(screen.getByText('10')).toBeInTheDocument()
     expect(screen.getByText('85')).toBeInTheDocument()
+    // Confirmed/High uses the red edge, not the amber hidden-conflict edge.
+    const row = container.querySelector('tbody tr')
+    expect(row!.classList.contains('row-confirmed')).toBe(true)
+    expect(row!.classList.contains('row-hidden-conflict')).toBe(false)
   })
 
   it('shows no note for a suspected pair', () => {

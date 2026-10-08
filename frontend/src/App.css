@@ -330,6 +330,11 @@ main.container > * + * {
   background: rgba(245, 158, 11, 0.06);
 }
 
+.row-confirmed {
+  border-left: 4px solid #ef4444;
+  background: rgba(239, 68, 68, 0.05);
+}
+
 .rationale-lines {
   display: flex;
   flex-direction: column;
