@@ -28,6 +28,19 @@ class Settings(BaseSettings):
     nemotron_input_usd_per_1m: float = 0.30
     nemotron_output_usd_per_1m: float = 0.90
 
+    # Verify-by-test: only for high-risk pairs (published or model score at or
+    # above this), and only on local repos under VERIFY_ALLOWED_ROOTS (default:
+    # the bundled demo/ folder). Never on remote clones.
+    verify_enabled: bool = True
+    verify_min_score: float = 70.0
+    # os.pathsep-separated extra roots where generated tests may run.
+    verify_allowed_roots: str = ""
+    verify_max_attempts: int = 2
+    # Seconds for one test-generation model call (reasoning + code).
+    verify_llm_timeout_seconds: float = 120.0
+    verify_timeout_seconds: float = 30.0
+    verify_max_pairs: int = 3
+
     # --- Tavily (used later by the Resolver for doc lookups) ---
     tavily_api_key: str = ""
 

@@ -19,6 +19,9 @@ class AnalyzeRequest(BaseModel):
         None, description="Branches to compare. Defaults to all non-base local branches."
     )
     use_cache: bool = Field(True, description="Reuse cached Nemotron results for identical SHAs.")
+    verify: bool = Field(
+        True, description="Run verify-by-test on high-risk pairs (local/demo repos only)."
+    )
 
 
 class ChangedFile(BaseModel):
@@ -52,6 +55,50 @@ ScoreSource = Literal["model", "git"]
 FallbackReason = Literal[
     "no_api_key", "disabled", "prefiltered", "pair_cap", "model_error", "unparsable"
 ]
+VerifyStatus = Literal["confirmed", "suspected", "error", "skipped"]
+
+
+class VerifyRun(BaseModel):
+    """One execution of the generated test on a checkout."""
+
+    target: Literal["a", "b", "base", "merge"]
+    ref: str
+    selection: str
+    exit_code: int | None
+    passed: int = 0
+    failed: int = 0
+    errors: int = 0
+    timed_out: bool = False
+    duration_s: float = 0.0
+    output: str = ""
+    # Per test function: "passed" | "failed" | "error" | "skipped".
+    cases: dict[str, str] = Field(default_factory=dict)
+
+
+class Verification(BaseModel):
+    """Verify-by-test result for one pair.
+
+    ``confirmed``: branch A's intent tests pass on A, branch B's pass on B,
+    and at least one intent test that captures its branch's change (it fails
+    on the merge-base) fails on the merge of A+B.
+    ``suspected``: ran, but did not meet that bar. ``error``: could not
+    generate or run a usable test. ``skipped``: not eligible (see reason).
+    """
+
+    status: VerifyStatus
+    reason: str = ""
+    test_code: str | None = None
+    test_path: str | None = None
+    runs: list[VerifyRun] = Field(default_factory=list)
+    attempts: int = 0
+    cached_test: bool = False
+    sandbox: str | None = None
+    merge_conflict: bool = False
+    # Intent tests that pass on their branch, fail on the base, fail on the merge.
+    confirming_tests: list[str] = Field(default_factory=list)
+    duration_s: float = 0.0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 class PairRisk(BaseModel):
@@ -79,6 +126,8 @@ class PairRisk(BaseModel):
     model_cached: bool = False
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Verify-by-test result (only for high-risk pairs on local/demo repos).
+    verification: Verification | None = None
 
 
 class UsageSummary(BaseModel):
@@ -98,6 +147,8 @@ class UsageSummary(BaseModel):
     pairs_sent_to_model: int = 0
     pairs_capped: int = 0
     top_k: int = 0
+    verify_pairs: int = 0
+    verify_confirmed: int = 0
     elapsed_s: float = 0.0
 
 

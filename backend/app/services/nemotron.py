@@ -52,9 +52,14 @@ class NemotronError(Exception):
     ``code`` is a stable fallback reason: ``model_error`` or ``unparsable``.
     """
 
-    def __init__(self, code: str, detail: str = "") -> None:
+    def __init__(
+        self, code: str, detail: str = "", prompt_tokens: int = 0, completion_tokens: int = 0
+    ) -> None:
         self.code = code
         self.detail = detail
+        # Tokens billed for a call that still failed (e.g. reasoning hit max_tokens).
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
         super().__init__(detail or code)
 
 
@@ -109,6 +114,7 @@ def complete(
     *,
     system_prompt: str | None = None,
     max_tokens: int = 2048,
+    timeout: float | None = None,
 ) -> str:
     """Call Token Factory chat completions once. No retries.
 
@@ -120,7 +126,7 @@ def complete(
     client = OpenAI(
         api_key=settings.nebius_api_key,
         base_url=settings.nebius_base_url,
-        timeout=settings.nebius_timeout_seconds,
+        timeout=timeout or settings.nebius_timeout_seconds,
         max_retries=0,
     )
     try:
@@ -140,8 +146,14 @@ def complete(
     except Exception as exc:
         raise NemotronError("model_error", _safe_detail(exc)) from exc
 
+    usage = getattr(completion, "usage", None)
+    used = (
+        int(getattr(usage, "prompt_tokens", 0) or 0),
+        int(getattr(usage, "completion_tokens", 0) or 0),
+    )
     if not completion.choices:
-        raise NemotronError("model_error", "empty model response")
+        raise NemotronError("model_error", "empty model response", *used)
+    finish = getattr(completion.choices[0], "finish_reason", None)
     content = completion.choices[0].message.content
     if isinstance(content, list):
         parts: list[str] = []
@@ -155,13 +167,11 @@ def complete(
                 parts.append(str(text) if text else "")
         content = "".join(parts)
     if not isinstance(content, str) or not content.strip():
-        raise NemotronError("model_error", "empty model response")
-    usage = getattr(completion, "usage", None)
-    return LLMText(
-        content,
-        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-    )
+        detail = "empty model response"
+        if finish:
+            detail += f" (finish_reason={finish})"
+        raise NemotronError("model_error", detail, *used)
+    return LLMText(content, prompt_tokens=used[0], completion_tokens=used[1])
 
 
 def assess_pair(prompt: str) -> ModelAssessment:

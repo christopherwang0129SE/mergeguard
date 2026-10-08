@@ -98,6 +98,51 @@ is `"model_error"` or `"unparsable"`. Pairs past the cap use `"pair_cap"`.
    `estimated_cost_usd`, prefilter/top-K counts, and `elapsed_s`. The dashboard
    summary bar shows calls, tokens, and estimated $.
 
+### Verify-by-test (semantic conflicts, with evidence)
+
+For pairs scored **high risk** (model level `high`, or published/model score
+≥ `VERIFY_MIN_SCORE`, default 70), Sentinel asks Nemotron to write one small
+pytest module: `test_branch_a_*` tests capture branch A's intent and
+`test_branch_b_*` tests capture branch B's intent. It then runs that module in
+throwaway `git worktree`s:
+
+| Checkout | Tests run | Expectation |
+|---|---|---|
+| branch A | `-k branch_a` | pass |
+| branch B | `-k branch_b` | pass |
+| merge-base of A and B | all | shows which tests capture a real change |
+| A merged with B (`git merge --no-commit`) | all | an intent test fails |
+
+`verification.status` is:
+
+- `confirmed`: A's tests pass on A, B's pass on B, and at least one intent test
+  that **fails on the merge-base** (so it captures its branch's change) **fails
+  on the merge**. A test that only pins unchanged base behaviour can never
+  confirm, so a docs-only branch cannot be "confirmed" against a code change.
+- `suspected`: the test ran but did not meet that bar (for example it also
+  passes on the merge). `error`: no usable test could be generated or run.
+  `skipped`: not eligible (for example not a local repo under the allowed roots).
+
+If the first test fails on its own branch, or does not exercise the
+interaction, Nemotron gets one repair round with the real pytest output
+(`VERIFY_MAX_ATTEMPTS`, default 2). The generated test, per-checkout pass/fail
+counts and per-test outcomes, trimmed pytest output, attempts, tokens and the
+artifact path (`WORKSPACE_DIR/verify/<key>/`) are returned under
+`pairs[].verification`. The test text is cached with the same SHA-based key, so
+an identical re-run makes no LLM calls (the test is re-executed).
+
+Safety:
+
+- Only local repos under `VERIFY_ALLOWED_ROOTS` (default: this repo's `demo/`
+  folder). Requests with `repo_url` never execute generated code.
+- The subprocess gets a minimal environment (no API keys or other secrets),
+  `VERIFY_TIMEOUT_SECONDS` (default 30) per run with the whole process group
+  killed on timeout, and no network: macOS `sandbox-exec` (deny network, writes
+  only in the temp dir) when available, plus an in-process socket guard.
+- Generated code importing network/process modules or calling `open`, `eval`,
+  `exec`, `os.system` and similar is rejected before it runs.
+- Send `"verify": false` to skip it for a request.
+
 ## Tests
 
 ```bash
@@ -120,6 +165,9 @@ backend/            FastAPI service
       git_service.py  pure-git diff/branch helpers (subprocess)
       nemotron.py     Token Factory chat-completions client
       sentinel.py     conflict-risk scoring (git, optional Nemotron blend)
+      prefilter.py    static symbol/call prefilter before any LLM call
+      cache.py        on-disk Nemotron result cache
+      verifier.py     verify-by-test (generated pytest in throwaway worktrees)
   tests/
 frontend/           dashboard (to be scaffolded)
 docs/               customer discovery + notes

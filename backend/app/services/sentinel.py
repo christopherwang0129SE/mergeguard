@@ -41,8 +41,9 @@ from app.schemas import (
     PairRisk,
     RiskLevel,
     UsageSummary,
+    Verification,
 )
-from app.services import cache, git_service, nemotron, prefilter
+from app.services import cache, git_service, nemotron, prefilter, verifier
 from app.services.nemotron import (
     NemotronError,
     build_pair_prompt,
@@ -268,6 +269,8 @@ def _refine_one(
         meter.record_call(prompt_tokens, completion_tokens)
         assessment = parse_assessment(reply)
     except NemotronError as exc:
+        if exc.prompt_tokens or exc.completion_tokens:
+            meter.record_call(exc.prompt_tokens, exc.completion_tokens)
         reason: FallbackReason = "unparsable" if exc.code == "unparsable" else "model_error"
         return pair.model_copy(update={"fallback_reason": reason})
     except Exception:
@@ -350,13 +353,51 @@ def _refine_with_model(
     return refined
 
 
+def _verify_high_risk(
+    repo: Path,
+    base_branch: str,
+    pairs: list[PairRisk],
+    *,
+    meter: UsageMeter,
+    use_cache: bool,
+    allowed: bool,
+) -> list[PairRisk]:
+    limit = max(0, int(settings.verify_max_pairs))
+    chosen = [p for p in pairs if verifier.is_high_risk(p)][:limit]
+    chosen_ids = {(p.branch_a, p.branch_b) for p in chosen}
+    out: list[PairRisk] = []
+    for pair in pairs:
+        if (pair.branch_a, pair.branch_b) not in chosen_ids:
+            out.append(pair)
+            continue
+        if not allowed:
+            result = Verification(
+                status="skipped",
+                reason="verify-by-test only runs on local repos under the allowed roots",
+            )
+        else:
+            result = verifier.verify_pair(
+                repo, base_branch, pair, meter=meter, use_cache=use_cache
+            )
+        out.append(pair.model_copy(update={"verification": result}))
+    return out
+
+
 def analyze(
     repo: Path,
     base_branch: str,
     branches: list[str],
     *,
     use_cache: bool = True,
+    verify: bool = False,
+    verify_allowed: bool = False,
 ) -> AnalyzeResponse:
+    """Score every branch pair.
+
+    ``verify`` runs verify-by-test on high-risk model-scored pairs.
+    ``verify_allowed`` must be True for any generated test to execute: the
+    caller decides it (local repo under the allowed roots, never a URL clone).
+    """
     started = time.monotonic()
     meter = UsageMeter()
     diffs = [git_service.diff_against_base(repo, b, base_branch) for b in branches]
@@ -387,6 +428,11 @@ def analyze(
         )
         pairs.sort(key=lambda p: p.score, reverse=True)
 
+    if verify and settings.verify_enabled and not skip:
+        pairs = _verify_high_risk(
+            repo, base_branch, pairs, meter=meter, use_cache=use_cache, allowed=verify_allowed
+        )
+
     risk_model = settings.nebius_model if any(p.score_source == "model" for p in pairs) else None
     usage = UsageSummary(
         **meter.summary_fields(),
@@ -395,6 +441,12 @@ def analyze(
         pairs_sent_to_model=sum(1 for p in pairs if p.score_source == "model"),
         pairs_capped=sum(1 for p in pairs if p.fallback_reason == "pair_cap"),
         top_k=max(0, int(settings.nebius_max_pairs)),
+        verify_pairs=sum(
+            1 for p in pairs if p.verification and p.verification.status != "skipped"
+        ),
+        verify_confirmed=sum(
+            1 for p in pairs if p.verification and p.verification.status == "confirmed"
+        ),
         elapsed_s=round(time.monotonic() - started, 2),
     )
     return AnalyzeResponse(
