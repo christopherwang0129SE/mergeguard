@@ -146,7 +146,7 @@ def test_module_that_no_longer_imports_on_the_merge_is_confirmed(brepo: Path) ->
     assert "store" in res.confirming[0].excerpt
 
 
-def test_js_tests_are_reported_unsupported_and_no_tests_is_skipped(brepo: Path) -> None:
+def test_js_tests_without_a_runner_are_unsupported_and_no_tests_is_skipped(brepo: Path) -> None:
     res = branch_tests.check_pair(brepo, "main", "feat/ts", "docs/readme")
     assert res.status == "unsupported" and res.unsupported_files == ["web/app.test.ts"]
     assert res.runs == []

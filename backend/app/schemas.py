@@ -107,7 +107,8 @@ BranchTestStatus = Literal["confirmed", "passed", "skipped", "unsupported", "err
 
 
 class BranchTestRun(BaseModel):
-    """One pytest run of the branches' own test files on a checkout."""
+    """One run (pytest, or vitest/jest for one JS package) of the branches' own
+    test files on a checkout."""
 
     target: Literal["a", "b", "base", "merge", "merge-rerun"]
     ref: str
@@ -118,6 +119,9 @@ class BranchTestRun(BaseModel):
     errors: int = 0
     timed_out: bool = False
     duration_s: float = 0.0
+    runner: str = "pytest"
+    package: str = ""  # JS: package dir the runner ran in
+    problem: str = ""  # why the run produced no results (setup failure, startup error)
 
 
 class BranchTestFailure(BaseModel):
@@ -136,8 +140,9 @@ class BranchTests(BaseModel):
     ``confirmed``: at least one of those tests passes on its branch, fails on
     the merge (twice) and does not already fail on the merge-base.
     ``passed``: ran, no such test. ``skipped``: no test files changed, or a
-    textual merge conflict. ``unsupported``: only non-Python test files.
-    ``error``: could not run (see reason).
+    textual merge conflict. ``unsupported``: only test files we cannot run
+    (JS/TS without a vitest/jest setup or a node binary). ``error``: could not
+    run (see reason).
     """
 
     status: BranchTestStatus
@@ -150,6 +155,9 @@ class BranchTests(BaseModel):
     merge_conflict: bool = False
     sandbox: str | None = None
     duration_s: float = 0.0
+    setup: list[str] = Field(default_factory=list)  # JS: install / build notes
+    install_s: float = 0.0  # JS dependency install time spent in this check (0 when cached)
+    build_s: float = 0.0  # JS workspace build time spent in this check
 
 
 class PairRisk(BaseModel):

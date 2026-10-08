@@ -51,6 +51,17 @@ class Settings(BaseSettings):
     branch_tests_max_files: int = 20  # per branch
     branch_tests_total_seconds: float = 600.0  # whole stage, per analysis
     branch_tests_max_pairs: int = 6
+    # JS/TS test files (vitest / jest). Dependencies are installed ONCE per
+    # lockfile (network, scripts disabled, outside the test sandbox) into
+    # WORKSPACE_DIR/js-deps and linked into each worktree; workspace packages a
+    # test imports through a missing build output are built in the sandbox and
+    # cached by their source tree hash. BRANCH_TESTS_JS_ENABLED=false: JS/TS
+    # test files are reported as unsupported.
+    branch_tests_js_enabled: bool = True
+    branch_tests_js_install_seconds: float = 900.0  # one-time install per lockfile
+    branch_tests_js_build_seconds: float = 300.0  # package builds per worktree
+    branch_tests_js_max_packages: int = 3  # test packages per pair (most shared first)
+    branch_tests_node: str = ""  # node binary; default: PATH, ~/.local/bin, Homebrew
 
     # --- Tavily (used later by the Resolver for doc lookups) ---
     tavily_api_key: str = ""

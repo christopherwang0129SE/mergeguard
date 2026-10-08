@@ -402,11 +402,15 @@ def sandbox_kind() -> str:
     return "socket guard"
 
 
-def _sandbox_prefix(tmp_root: Path) -> list[str]:
+def _sandbox_prefix(tmp_root: Path, loopback: bool = False) -> list[str]:
+    """``sandbox-exec`` on macOS: no network (``loopback``: except localhost),
+    writes only under ``tmp_root``. Elsewhere the socket guard does the job."""
     if sys.platform == "darwin" and os.path.exists(SANDBOX_EXEC):
         real = os.path.realpath(tmp_root)
+        local = ('(allow network* (local ip "localhost:*"))'
+                 '(allow network* (remote ip "localhost:*"))') if loopback else ""
         profile = (
-            "(version 1)(allow default)(deny network*)"
+            "(version 1)(allow default)(deny network*)" + local +
             "(deny file-write*)"
             f'(allow file-write* (subpath "{real}"))'
             '(allow file-write* (subpath "/dev"))'
