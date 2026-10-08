@@ -86,6 +86,40 @@ describe('VerificationDetails', () => {
     expect(screen.getByText('Confirmed by test')).toBeInTheDocument()
   })
 
+  it('shows the raised score note in the level cell of a confirmed pair', () => {
+    render(
+      <PairTable
+        pairs={[
+          pair({
+            score: 90,
+            level: 'high',
+            blended_score: 47.5,
+            score_note: 'raised: confirmed by test',
+            verification: verification(),
+          }),
+        ]}
+        risk_model={null}
+      />
+    )
+    expect(screen.getByText('Risk 90 / 100')).toBeInTheDocument()
+    expect(screen.getByText('High')).toBeInTheDocument()
+    expect(screen.getByTestId('score-note')).toHaveTextContent('raised: confirmed by test (blend 48)')
+    // Git and model columns stay as reported.
+    expect(screen.getByText('10')).toBeInTheDocument()
+    expect(screen.getByText('85')).toBeInTheDocument()
+  })
+
+  it('shows no note for a suspected pair', () => {
+    render(
+      <PairTable
+        pairs={[pair({ verification: verification({ status: 'suspected' }) })]}
+        risk_model={null}
+      />
+    )
+    expect(screen.queryByTestId('score-note')).toBeNull()
+    expect(screen.getByText('Medium')).toBeInTheDocument()
+  })
+
   it('adds confirmed-by-test counts to the usage line', () => {
     const usage: UsageSummary = {
       model: 'm', llm_calls: 2, cache_hits: 0, prompt_tokens: 4097, completion_tokens: 4618,

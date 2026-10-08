@@ -60,6 +60,8 @@ export interface PairRisk {
   prompt_tokens?: number;
   completion_tokens?: number;
   verification?: Verification | null;
+  score_note?: string | null;
+  blended_score?: number | null;
 }
 
 export type VerifyStatus = 'confirmed' | 'suspected' | 'error' | 'skipped';

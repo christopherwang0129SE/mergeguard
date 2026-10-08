@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     verify_llm_timeout_seconds: float = 150.0
     verify_timeout_seconds: float = 30.0
     verify_max_pairs: int = 3
+    # A confirmed verdict is authoritative: level high, shown score at least this.
+    verify_confirmed_floor: float = 90.0
 
     # --- Tavily (used later by the Resolver for doc lookups) ---
     tavily_api_key: str = ""

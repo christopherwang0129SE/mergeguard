@@ -86,6 +86,14 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
                     <span className="level-word" style={{ color: levelToTextColor(pair.level) }}>
                       {levelToText(pair.level)}
                     </span>
+                    {pair.score_note && (
+                      <span className="score-note" data-testid="score-note">
+                        {pair.score_note}
+                        {pair.blended_score !== null && pair.blended_score !== undefined
+                          ? ` (blend ${Math.round(pair.blended_score)})`
+                          : ''}
+                      </span>
+                    )}
                   </td>
                   <td>{formatScore(pair.git_score)}</td>
                   <td>{formatScore(pair.model_score)}</td>

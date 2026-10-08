@@ -320,6 +320,13 @@ def test_analyze_verifies_only_high_risk_pairs_and_never_docs(
     by_pair = {frozenset((p.branch_a, p.branch_b)): p for p in res.pairs}
     hot = by_pair[frozenset(("feat/scale", "feat/total"))]
     assert hot.verification is not None and hot.verification.status == "confirmed"
+    # Confirmed is authoritative: high, floored at 90; git/model scores untouched.
+    assert hot.level == "high"
+    assert hot.score == 90.0
+    assert hot.score_note == "raised: confirmed by test"
+    assert hot.model_score == 90 and hot.git_score is not None and hot.git_score < 90
+    assert hot.blended_score is not None and hot.blended_score < 90
+    assert res.pairs[0] is hot or res.pairs[0].branch_b == hot.branch_b
     for other in ("feat/scale", "feat/total"):
         docs = by_pair[frozenset(("docs/readme", other))]
         assert docs.fallback_reason == "prefiltered"
@@ -474,3 +481,24 @@ def test_stale_worktrees_from_a_killed_run_are_cleaned_up(vrepo: Path, tmp_path:
     assert str(fresh_root.name) in remaining  # a concurrent run is left alone
     assert not stale_root.exists()
     _git(vrepo, "worktree", "remove", "--force", str(fresh_root / "a"))
+
+
+def test_confirmed_verdict_is_authoritative_and_suspected_keeps_the_blend() -> None:
+    from app.schemas import Verification
+
+    blended = _pair(score=47.5, level="medium")
+    confirmed = sentinel.apply_verification(blended, Verification(status="confirmed", reason="r"))
+    assert (confirmed.score, confirmed.level) == (90.0, "high")
+    assert confirmed.blended_score == 47.5
+    assert confirmed.score_note == "raised: confirmed by test"
+    assert (confirmed.git_score, confirmed.model_score, confirmed.model_level) == (10, 85, "high")
+
+    above = sentinel.apply_verification(
+        _pair(score=96.0, level="high"), Verification(status="confirmed", reason="r")
+    )
+    assert above.score == 96.0  # a floor, not a cap
+
+    for status in ("suspected", "error", "skipped"):
+        kept = sentinel.apply_verification(blended, Verification(status=status, reason="r"))
+        assert (kept.score, kept.level) == (47.5, "medium")
+        assert kept.score_note is None and kept.blended_score is None

@@ -288,3 +288,43 @@ describe('SummaryBar usage', () => {
     ).toBeInTheDocument()
   })
 })
+
+describe('SummaryBar confirmed by test', () => {
+  const confirmedPair = pair('feat/discount-cap', 'feat/tax-before-discount', 90, 'high', {
+    score_source: 'model',
+    git_score: 10,
+    model_score: 85,
+    model_level: 'high',
+    blended_score: 47.5,
+    score_note: 'raised: confirmed by test',
+    verification: {
+      status: 'confirmed',
+      reason: 'r',
+      runs: [],
+      attempts: 1,
+      cached_test: false,
+      merge_conflict: false,
+      duration_s: 1,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+    },
+  })
+  const docs = (b: string) => pair('docs/readme', b, 0, 'none', { fallback_reason: 'prefiltered', shared_files: 0 })
+
+  it('headlines high risk with the confirmed count and keeps the hidden-conflict info', () => {
+    render(
+      <SummaryBar pairs={[confirmedPair, docs('feat/discount-cap'), docs('feat/tax-before-discount')]} />
+    )
+    expect(
+      screen.getByText('1 of 3 branch pairs at high risk · 1 confirmed by test · 1 hidden')
+    ).toBeInTheDocument()
+  })
+
+  it('does not count suspected verdicts as confirmed', () => {
+    const suspected = pair('a', 'b', 80, 'high', {
+      verification: { ...confirmedPair.verification!, status: 'suspected' },
+    })
+    render(<SummaryBar pairs={[suspected]} />)
+    expect(screen.getByText('1 of 1 branch pairs at high risk')).toBeInTheDocument()
+  })
+})

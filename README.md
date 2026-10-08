@@ -119,8 +119,12 @@ throwaway `git worktree`s:
   that **fails on the merge-base** (so it captures its branch's change) **fails
   on the merge**. A test that only pins unchanged base behaviour can never
   confirm, so a docs-only branch cannot be "confirmed" against a code change.
-- `suspected`: the test ran but did not meet that bar (for example it also
-  passes on the merge). `error`: no usable test could be generated or run.
+  A confirmed verdict is authoritative: the pair's `level` becomes `high`
+  and its shown `score` is floored at `VERIFY_CONFIRMED_FLOOR` (default 90).
+  `git_score` and `model_score` are left as-is, the pre-verify blend is kept
+  in `blended_score`, and `score_note` is `"raised: confirmed by test"`.
+- `suspected`: the test ran but did not meet that bar, for example when it
+  also passes on the merge; the blended score is kept. `error`: no usable test could be generated or run.
   `skipped`: not eligible (for example not a local repo under the allowed roots).
 
 If a test fails on its own branch, or does not exercise the interaction,

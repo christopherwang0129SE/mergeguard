@@ -128,6 +128,10 @@ class PairRisk(BaseModel):
     completion_tokens: int = 0
     # Verify-by-test result (only for high-risk pairs on local/demo repos).
     verification: Verification | None = None
+    # Set when something other than the git/model blend decided `score`/`level`,
+    # e.g. "raised: confirmed by test". `blended_score` keeps the blend.
+    score_note: str | None = None
+    blended_score: float | None = Field(default=None, ge=0, le=100)
 
 
 class UsageSummary(BaseModel):

@@ -198,3 +198,11 @@ export const getBranchRiskLevel = (
 export const sortPairsByScoreDesc = (pairs: PairRisk[]): PairRisk[] => {
   return [...pairs].sort((a, b) => b.score - a.score);
 };
+
+/**
+ * Verify-by-test confirmed the conflict (generated intent tests pass on each
+ * branch and fail on the merge). The backend then publishes level high.
+ */
+export const isConfirmedByTest = (pair: {
+  verification?: { status: string } | null;
+}): boolean => pair.verification?.status === 'confirmed';

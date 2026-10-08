@@ -439,3 +439,11 @@ main.container > * + * {
   color: #6b7280;
   font-size: 11px;
 }
+
+.score-note {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #991b1b;
+  white-space: nowrap;
+}

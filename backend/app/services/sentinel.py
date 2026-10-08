@@ -379,8 +379,29 @@ def _verify_high_risk(
             result = verifier.verify_pair(
                 repo, base_branch, pair, meter=meter, use_cache=use_cache
             )
-        out.append(pair.model_copy(update={"verification": result}))
+        out.append(apply_verification(pair, result))
     return out
+
+
+CONFIRMED_NOTE = "raised: confirmed by test"
+
+
+def apply_verification(pair: PairRisk, result: Verification) -> PairRisk:
+    """Attach a verdict. ``confirmed`` is authoritative: level ``high`` and the
+    shown score floored at ``verify_confirmed_floor`` (git/model scores are kept
+    as-is). Any other status keeps the blended score."""
+    update: dict = {"verification": result}
+    if result.status == "confirmed":
+        floor = float(settings.verify_confirmed_floor)
+        update.update(
+            {
+                "blended_score": pair.score,
+                "score": round(min(max(pair.score, floor), 100.0), 1),
+                "level": "high",
+                "score_note": CONFIRMED_NOTE,
+            }
+        )
+    return pair.model_copy(update=update)
 
 
 def analyze(
@@ -432,6 +453,7 @@ def analyze(
         pairs = _verify_high_risk(
             repo, base_branch, pairs, meter=meter, use_cache=use_cache, allowed=verify_allowed
         )
+        pairs.sort(key=lambda p: p.score, reverse=True)
 
     risk_model = settings.nebius_model if any(p.score_source == "model" for p in pairs) else None
     usage = UsageSummary(
