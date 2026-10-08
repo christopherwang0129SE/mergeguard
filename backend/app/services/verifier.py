@@ -47,7 +47,7 @@ from app.services import cache, git_service, nemotron, prefilter
 from app.services.nemotron import NemotronError
 from app.services.usage import UsageMeter
 
-PROMPT_VERSION = "verify-v3"
+PROMPT_VERSION = "verify-v4"
 TEST_FILENAME = "test_mergeguard_intent.py"
 MAX_OUTPUT_CHARS = 4000
 MAX_FILE_CHARS = 5000
@@ -87,8 +87,10 @@ SYSTEM_PROMPT = (
     "project's own dependencies are installed. Besides the project, use only "
     "the standard library and pytest. No network, no subprocess, no file or "
     "environment access, no randomness, no sleeping. Define test functions at "
-    "module level (no classes). Reply with only the code in a single ```python "
-    "block."
+    "module level (no classes). The same module runs on branch A, branch B, "
+    "their merge-base and their merge, so import anything that exists on only "
+    "one branch inside that branch's test functions, not at module level. "
+    "Reply with only the code in a single ```python block."
 )
 
 
@@ -488,6 +490,10 @@ def run_test(
     )
 
 
+def _collection_error(run: VerifyRun) -> bool:
+    return "ERROR collecting" in run.output or "error during collection" in run.output
+
+
 def _run_ok(run: VerifyRun) -> bool:
     return (not run.timed_out) and run.exit_code == 0 and run.passed > 0 and run.failed == 0 and run.errors == 0
 
@@ -773,9 +779,14 @@ def verify_pair(
                     break
                 if not own_ok:
                     failing = [r for r in runs[:2] if not _run_ok(r)]
-                    next_prompt = build_repair_prompt(
-                        prompt, code, failing, "The previous test did not pass on its own branch."
-                    )
+                    problem = "The previous test did not pass on its own branch."
+                    if any(_collection_error(r) for r in runs):
+                        problem += (
+                            " The module failed to import on at least one checkout: move "
+                            "imports of names that exist on only one branch into that "
+                            "branch's test functions."
+                        )
+                    next_prompt = build_repair_prompt(prompt, code, failing, problem)
                 else:
                     next_prompt = build_repair_prompt(
                         prompt,

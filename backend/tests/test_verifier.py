@@ -562,3 +562,9 @@ def test_focus_paths_from_evidence() -> None:
         "Other: changed by both a and b (pkg/core/models.py)",
     ]
     assert verifier.focus_paths(evidence) == ["pkg/core/models.py", "tests/test_ui.py"]
+
+
+def test_collection_error_detection_and_prompt_guidance(tmp_path: Path) -> None:
+    run = _raw_run(tmp_path, "from not_on_this_branch import thing\n\n\ndef test_branch_b_x():\n    pass\n")
+    assert run.errors == 1 and verifier._collection_error(run), run.output
+    assert "inside that branch's test functions" in verifier.SYSTEM_PROMPT
