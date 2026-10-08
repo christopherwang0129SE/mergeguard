@@ -10,7 +10,14 @@ import pytest
 from app.config import Settings, settings
 from app.services import sentinel
 from app.services.nemotron import LLMText, estimate_cost_usd
-from app.services.prefilter import file_symbols, regex_symbols, symbol_overlap
+from app.schemas import BranchDiff
+from app.services import git_service
+from app.services.prefilter import (
+    branch_symbols,
+    file_symbols,
+    regex_symbols,
+    symbol_overlap,
+)
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -136,6 +143,54 @@ def test_changed_method_matches_method_calls() -> None:
     assert {(d.name, d.kind) for d in changed.defs} == {("total", "method")}
     caller = file_symbols("t.py", "def f(cart):\n    return cart.total()\n", [(2, 2)])
     assert symbol_overlap(changed, caller)[0] == ("total",)
+
+
+def test_class_field_change_counts_as_a_class_change() -> None:
+    src = (
+        "from pydantic import BaseModel\n\n\n"
+        "class Preview(BaseModel):\n    a: int\n    b: int\n"
+        "    def label(self):\n        return 'x'\n"
+    )
+    # A new required field on line 6 changes the constructor.
+    assert ("Preview", "class") in {(d.name, d.kind) for d in file_symbols("m.py", src, [(6, 6)]).defs}
+    # A method body change is a method change, not a constructor change.
+    assert {(d.name, d.kind) for d in file_symbols("m.py", src, [(8, 8)]).defs} == {
+        ("label", "method")
+    }
+
+
+def test_calls_follow_reexports(tmp_path: Path) -> None:
+    r = tmp_path / "rx"
+    (r / "pkg" / "core").mkdir(parents=True)
+    (r / "pkg" / "ui").mkdir(parents=True)
+    _git(r, "init", "-q", "-b", "main")
+    _git(r, "config", "user.email", "t@example.com")
+    _git(r, "config", "user.name", "Test")
+    (r / "pkg" / "core" / "models.py").write_text("class Preview:\n    a: int\n")
+    (r / "pkg" / "ui" / "state.py").write_text("from pkg.core.models import Preview\n")
+    (r / "pkg" / "ui" / "__init__.py").write_text("from .state import Preview\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-qm", "base")
+    _git(r, "checkout", "-q", "-b", "fields")
+    (r / "pkg" / "core" / "models.py").write_text("class Preview:\n    a: int\n    b: int\n")
+    _git(r, "commit", "-qam", "new required field")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "checkout", "-q", "-b", "caller")
+    (r / "test_ui.py").write_text("from pkg.ui import Preview\n\n\ndef test_p():\n    Preview(a=1)\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-qm", "caller via two re-exports")
+    _git(r, "checkout", "-q", "main")
+
+    def syms(branch: str):
+        diff = git_service.diff_against_base(r, branch, "main")
+        assert isinstance(diff, BranchDiff)
+        return branch_symbols(r, diff)
+
+    names, evidence = symbol_overlap(syms("fields"), syms("caller"), "fields", "caller")
+    assert names == ("Preview",)
+    assert evidence == (
+        "Preview: changed by fields (pkg/core/models.py), called by caller (test_ui.py)",
+    )
 
 
 def test_regex_heuristic_for_other_languages() -> None:

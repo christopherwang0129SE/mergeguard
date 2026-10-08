@@ -19,6 +19,11 @@ only matches a changed *method* named ``total``. Other languages use a regex
 heuristic (``def`` / ``function`` / ``func`` / ``fn`` names and ``name(`` call
 sites on changed lines) matched by name.
 
+A class counts as changed when its header or one of its field declarations
+changed (the fields are the constructor of a dataclass / pydantic model), and
+calls are followed through re-exports (``from pkg.state import Model`` where
+``pkg/state.py`` re-imports ``Model`` from the module that defines it).
+
 A pair is a model candidate only when the branches share a file or have a
 symbol overlap. Candidates are ranked and only the top K reach Nemotron.
 """
@@ -200,7 +205,16 @@ def python_symbols(
                 end = getattr(node, "end_lineno", None) or node.lineno
                 start = min([node.lineno] + [d.lineno for d in node.decorator_list])
                 if isinstance(node, ast.ClassDef):
-                    if _in_hunks(start, node.lineno, hunks):
+                    # A class changes when its header changes or when one of its
+                    # field declarations does: for dataclasses, pydantic models,
+                    # attrs and NamedTuples the fields ARE the constructor.
+                    if _in_hunks(start, node.lineno, hunks) or any(
+                        _in_hunks(
+                            stmt.lineno, getattr(stmt, "end_lineno", None) or stmt.lineno, hunks
+                        )
+                        for stmt in node.body
+                        if isinstance(stmt, (ast.AnnAssign, ast.Assign))
+                    ):
                         out.defs.add(Def(this_module, node.name, "class", path))
                     visit(node.body, in_class=True)
                 elif _in_hunks(start, end, hunks):
@@ -273,6 +287,99 @@ def file_symbols(path: str, source: str, hunks: list[tuple[int, int]]) -> Branch
     return regex_symbols(source, hunks, path)
 
 
+def _reexports(source: str, this_module: str, is_package: bool) -> dict[str, str]:
+    """``name -> source module`` for names a module imports with ``from X import``.
+
+    Used to follow re-exports: ``from pkg.state import Model`` where
+    ``pkg/state.py`` itself does ``from core.models import Model``.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    package = this_module.split(".") if is_package else this_module.split(".")[:-1]
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level:
+            keep = len(package) - (node.level - 1)
+            if keep < 0:
+                continue
+            base = ".".join(package[:keep] + ([node.module] if node.module else []))
+        else:
+            base = node.module or ""
+        for alias in node.names:
+            if alias.name != "*" and base:
+                out[alias.asname or alias.name] = f"{base}:{alias.name}"
+    return out
+
+
+class _ModuleIndex:
+    """Find a branch's Python file for a dotted module name (suffix match)."""
+
+    def __init__(self, repo: Path, ref: str) -> None:
+        self.repo = repo
+        self.ref = ref
+        self._by_module: dict[str, list[str]] | None = None
+        self._exports: dict[str, dict[str, str]] = {}
+
+    def _index(self) -> dict[str, list[str]]:
+        if self._by_module is None:
+            self._by_module = {}
+            try:
+                listing = git_service._run(self.repo, "ls-tree", "-r", "--name-only", self.ref)
+            except git_service.GitError:
+                listing = ""
+            for path in listing.splitlines():
+                if path.endswith(".py"):
+                    self._by_module.setdefault(module_name(path), []).append(path)
+        return self._by_module
+
+    def paths(self, module: str) -> list[str]:
+        want = module.strip(".").split(".")
+        found = []
+        for mod, paths in self._index().items():
+            parts = mod.split(".")
+            if len(parts) >= len(want) and parts[-len(want):] == want:
+                found.extend(paths)
+        return sorted(found)[:3]
+
+    def exports(self, path: str) -> dict[str, str]:
+        if path not in self._exports:
+            try:
+                source = git_service.show_file(self.repo, self.ref, path) or ""
+            except git_service.GitError:
+                source = ""
+            self._exports[path] = _reexports(
+                source, module_name(path), path.endswith("__init__.py")
+            )
+        return self._exports[path]
+
+
+REEXPORT_DEPTH = 3
+
+
+def resolve_reexports(calls: set[Call], index: _ModuleIndex) -> set[Call]:
+    """Add the defining module for calls that go through a re-export."""
+    extra: set[Call] = set()
+    for call in calls:
+        if call.module in (ANY, METHOD, UNRESOLVED):
+            continue
+        module, name = call.module, call.name
+        for _ in range(REEXPORT_DEPTH):
+            target = None
+            for path in index.paths(module):
+                target = index.exports(path).get(name)
+                if target:
+                    break
+            if not target:
+                break
+            module, name = target.split(":", 1)
+            extra.add(Call(module, name, call.path))
+    return calls | extra
+
+
 def branch_symbols(repo: Path, diff: BranchDiff) -> BranchSymbols:
     """Union of changed symbols across a branch's changed files."""
     total = BranchSymbols()
@@ -290,6 +397,8 @@ def branch_symbols(repo: Path, diff: BranchDiff) -> BranchSymbols:
         total.calls |= syms.calls
     total.defs = {d for d in total.defs if d.name not in _IGNORED_NAMES}
     total.calls = {c for c in total.calls if c.name not in _IGNORED_NAMES}
+    if total.calls:
+        total.calls = resolve_reexports(total.calls, _ModuleIndex(repo, diff.branch))
     return total
 
 
