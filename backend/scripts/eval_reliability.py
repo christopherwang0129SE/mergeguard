@@ -13,14 +13,20 @@ Cases (local repos under demo/, built if missing):
 - checkout-demo: feat/discount-cap x feat/tax-before-discount expected
   confirmed; the docs/readme pairs are harmless.
 - harmless-demo: every pair is harmless (demo/make_harmless_repo.py).
-- harmless-demo-forced-verify: the same repo with verify-by-test forced on
-  EVERY pair (normally harmless pairs never reach verify); --forced-runs runs.
+- harmless-demo-forced-verify: the same repo with verify-by-test AND the
+  branch-tests stage forced on EVERY pair (normally harmless pairs never
+  reach either); --forced-runs runs.
 - Hall of Fame replays (not in the default set; pass --cases): kiss
   (ThinkersJournal/KISS PR #311 x #315) and elastic
   (elastic/observability-migration-platform PR #381 x #383), built by
   demo/replay.py --case NAME; each PR pair is expected to be confirmed.
   qwen-code (QwenLM/qwen-code PR #8947 x #8933) is TypeScript: verify-by-test
-  does not run there, so only the model triage is measured.
+  and the branch-tests stage are Python-only, so only the model triage is
+  measured.
+
+Two confirmation layers are counted separately: "branch test" (the
+branches' own changed tests run on A+B, deterministic, no LLM) and "intent
+test" (Nemotron-generated tests run 4-way). "confirmed" = either layer.
 
 A harmless pair must never be confirmed. Raw results go to
 backend/.workspace/eval/<timestamp>/ (gitignored).
@@ -41,10 +47,11 @@ DEMO = ROOT / "demo"
 sys.path.insert(0, str(BACKEND))
 
 from app.config import settings  # noqa: E402
-from app.services import git_service, sentinel, verifier  # noqa: E402
+from app.services import branch_tests, git_service, sentinel, verifier  # noqa: E402
 
 _is_high_risk = verifier.is_high_risk
 _max_pairs = settings.verify_max_pairs
+_eligible = branch_tests.eligible_pairs
 
 
 @dataclass
@@ -96,7 +103,11 @@ class Row:
     label: str
     runs: int = 0
     pairs: int = 0
-    verdicts: dict[str, int] = field(default_factory=dict)
+    verdicts: dict[str, int] = field(default_factory=dict)  # intent-test verdicts
+    branch: dict[str, int] = field(default_factory=dict)  # branch-test statuses
+    confirmed: int = 0  # either layer
+    by_branch: int = 0
+    by_intent: int = 0
     unsupported: int = 0
     times: list[float] = field(default_factory=list)
     tokens: int = 0
@@ -109,6 +120,19 @@ class Row:
 
 def _status(pair) -> str:
     return pair.verification.status if pair.verification else "not verified"
+
+
+def _branch_status(pair) -> str:
+    return pair.branch_tests.status if pair.branch_tests else "not run"
+
+
+def _layers(pair) -> list[str]:
+    layers = []
+    if pair.branch_tests is not None and pair.branch_tests.status == "confirmed":
+        layers.append("branch test")
+    if pair.verification is not None and pair.verification.status == "confirmed":
+        layers.append("intent test")
+    return layers
 
 
 def _record(case: Case, res, elapsed: float, target: Row, harmless: Row) -> str:
@@ -124,10 +148,18 @@ def _record(case: Case, res, elapsed: float, target: Row, harmless: Row) -> str:
         row = target if key in case.expect_confirmed else harmless
         row.pairs += 1
         row.add(_status(pair))
+        bstat = _branch_status(pair)
+        row.branch[bstat] = row.branch.get(bstat, 0) + 1
+        layers = _layers(pair)
+        row.confirmed += bool(layers)
+        row.by_branch += "branch test" in layers
+        row.by_intent += "intent test" in layers
         row.unsupported += bool(pair.unsupported_claims)
         if pair.model_score is not None:
             row.model_scores.append(pair.model_score)
-        line.append(f"{pair.branch_a} x {pair.branch_b}: {_status(pair)} (model {pair.model_score})")
+        verdict = "confirmed by " + " + ".join(layers) if layers else "not confirmed"
+        line.append(f"{pair.branch_a} x {pair.branch_b}: {verdict} [branch tests {bstat}, "
+                    f"intent test {_status(pair)}] (model {pair.model_score})")
     return "; ".join(line)
 
 
@@ -138,21 +170,30 @@ def _finish(target: Row, harmless: Row) -> list[Row]:
 
 
 def _render(rows: list[Row], spent: float, budget: float | None, notes: list[str]) -> str:
-    header = ("| case | runs | pairs | confirmed | suspected | error | not verified | "
-              "unsupported claims | median time (s) | total tokens | total $ |")
-    lines = [header, "|" + "---|" * 11]
+    header = ("| case | runs | pairs | confirmed (either layer) | by branch test | "
+              "by intent test | intent suspected | intent error | intent not verified | "
+              "branch-test statuses | unsupported claims | median time (s) | total tokens | "
+              "total $ |")
+    lines = [header, "|" + "---|" * 14]
     for r in rows:
         v = r.verdicts
         shared = r.label.endswith("(harmless pairs)") and any(
             o.label.split(" ")[0] == r.label.split(" ")[0] and o is not r for o in rows
         )
         cost = ("(same runs)", "(same runs)") if shared else (f"{r.tokens:,}", f"{r.usd:.4f}")
+        statuses = ", ".join(f"{k} {n}" for k, n in sorted(r.branch.items()))
         lines.append(
-            f"| {r.label} | {r.runs} | {r.pairs} | {v.get('confirmed', 0)} | "
-            f"{v.get('suspected', 0)} | {v.get('error', 0)} | "
-            f"{v.get('not verified', 0) + v.get('skipped', 0)} | {r.unsupported} | "
+            f"| {r.label} | {r.runs} | {r.pairs} | {r.confirmed} | {r.by_branch} | "
+            f"{r.by_intent} | {v.get('suspected', 0)} | {v.get('error', 0)} | "
+            f"{v.get('not verified', 0) + v.get('skipped', 0)} | {statuses} | {r.unsupported} | "
             f"{statistics.median(r.times):.1f} | {cost[0]} | {cost[1]} |"
         )
+    harmless = [r for r in rows if r.label.endswith("(harmless pairs)")]
+    if harmless:
+        lines.append(
+            f"\nHarmless pairs: {sum(r.pairs for r in harmless)} pair-runs, false confirmations "
+            f"{sum(r.confirmed for r in harmless)} (branch test {sum(r.by_branch for r in harmless)}, "
+            f"intent test {sum(r.by_intent for r in harmless)}).")
     tail = f" (budget ${budget})" if budget is not None else ""
     lines.append(f"\nTotal estimated spend: ${spent:.4f}{tail}.")
     lines += notes
@@ -236,9 +277,11 @@ def main() -> int:
         if forced:
             verifier.is_high_risk = lambda _pair: True
             settings.verify_max_pairs = 100
+            branch_tests.eligible_pairs = lambda pairs: list(pairs)
         else:
             verifier.is_high_risk = _is_high_risk
             settings.verify_max_pairs = _max_pairs
+            branch_tests.eligible_pairs = _eligible
         stem = f"{case.name}-forced" if args.force_verify and not case.force_verify else case.name
         for i in range(1, (args.forced_runs if case.force_verify else args.runs) + 1):
             if spent >= args.max_usd:
