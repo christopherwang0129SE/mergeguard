@@ -175,3 +175,14 @@ def test_no_key_note(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "nebius_api_key", "")
     out = tools.list_conflicting_branches(str(repo), analyzer=FakeEngine())
     assert "git heuristic only" in out["note"]
+
+
+def test_engine_focus_scores_only_pairs_with_the_branch(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import sentinel
+
+    monkeypatch.setattr(settings, "nebius_enabled", False)
+    branches = ["docs/readme", "feat/cap", "feat/log", "feat/tax"]
+    res = sentinel.analyze(repo, "main", branches, focus="feat/tax")
+    assert sorted((p.branch_a, p.branch_b) for p in res.pairs) == sorted(
+        tuple(sorted(("feat/tax", b))) for b in ("docs/readme", "feat/cap", "feat/log"))
+    assert len(sentinel.analyze(repo, "main", branches).pairs) == 6
