@@ -56,3 +56,11 @@ export interface AnalyzeResponse {
   pairs: PairRisk[];
   risk_model?: string | null;
 }
+
+export interface HealthResponse {
+  status: string;
+  nebius_ready: boolean;
+  nebius_enabled: boolean;
+  nebius_model: string | null;
+  tavily_ready: boolean;
+}
