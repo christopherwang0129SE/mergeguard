@@ -107,9 +107,10 @@ export const isFloorRule = (pair: {
 
 /**
  * A hidden conflict: the published score came from the model
- * (`score_source === 'model'`) and the model's level is strictly higher
- * than the git level derived from `git_score` — the model flagged a
- * semantic clash the diff heuristic missed.
+ * (`score_source === 'model'`), the model's level is medium or high, and
+ * it is strictly higher than the git level derived from `git_score` — the
+ * model flagged a semantic clash the diff heuristic missed. A none -> low
+ * move is not a hidden conflict: the model still sees no real risk.
  */
 export const isHiddenConflict = (pair: {
   score_source?: 'model' | 'git';
@@ -119,7 +120,37 @@ export const isHiddenConflict = (pair: {
   pair.score_source === 'model' &&
   pair.model_level !== null &&
   pair.model_level !== undefined &&
+  (pair.model_level === 'medium' || pair.model_level === 'high') &&
   levelRank(pair.model_level) > levelRank(gitLevelFromScore(pair.git_score));
+
+/**
+ * A disagreement for the summary bar: the published score came from the
+ * model, the model's level differs from the git level, and at least one
+ * side is medium or high. A none <-> low move is not a disagreement —
+ * both sides agree there is no real risk.
+ */
+export const isDisagree = (pair: {
+  score_source?: 'model' | 'git';
+  model_level?: RiskLevel | null;
+  git_score?: number | null;
+}): boolean => {
+  if (pair.score_source !== 'model') {
+    return false;
+  }
+  if (pair.model_level === null || pair.model_level === undefined) {
+    return false;
+  }
+  const gitLevel = gitLevelFromScore(pair.git_score);
+  if (pair.model_level === gitLevel) {
+    return false;
+  }
+  return (
+    pair.model_level === 'medium' ||
+    pair.model_level === 'high' ||
+    gitLevel === 'medium' ||
+    gitLevel === 'high'
+  );
+};
 
 export const getBranchRiskLevel = (
   branch: string,

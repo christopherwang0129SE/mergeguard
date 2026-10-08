@@ -1,4 +1,4 @@
-import { levelToColor, levelToText, levelRank, gitLevelFromScore } from '../utils/risk';
+import { levelToColor, levelToText, levelRank, isDisagree } from '../utils/risk';
 import type { PairRisk, RiskLevel } from '../types';
 
 interface SummaryBarProps {
@@ -16,16 +16,11 @@ const worstLevel = (pairs: PairRisk[]): RiskLevel =>
 
 /**
  * Pairs where Nemotron disagrees with git: the published score came from
- * the model and the model's level differs from the git level.
+ * the model, the levels differ, and at least one side is medium or high
+ * (a none <-> low move is not a disagreement).
  */
 const disagreeCount = (pairs: PairRisk[]): number =>
-  pairs.filter(
-    (pair) =>
-      pair.score_source === 'model' &&
-      pair.model_level !== null &&
-      pair.model_level !== undefined &&
-      pair.model_level !== gitLevelFromScore(pair.git_score)
-  ).length;
+  pairs.filter((pair) => isDisagree(pair)).length;
 
 /**
  * Pairs where the model was actually used (published score from the model).
