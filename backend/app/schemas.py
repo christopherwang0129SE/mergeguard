@@ -124,6 +124,13 @@ class PairRisk(BaseModel):
     # One line per overlap: who changed the symbol, who changes/calls it, where.
     symbol_evidence: list[str] = Field(default_factory=list)
     prefilter_candidate: bool = True
+    # Exact static signature checks of the evidence (parsed both sides):
+    # call sites that no longer match a changed signature, and signature
+    # changes every call site still matches.
+    static_breaks: list[str] = Field(default_factory=list)
+    static_compatible: list[str] = Field(default_factory=list)
+    # Parts of the model rationale the static checks contradict.
+    unsupported_claims: list[str] = Field(default_factory=list)
     # Model call accounting for this pair (0 tokens when served from cache).
     model_cached: bool = False
     prompt_tokens: int = 0

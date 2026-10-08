@@ -375,7 +375,49 @@ def test_evidence_snippets_show_definition_diff_and_call_site(tmp_path: Path) ->
         r, "main", ["Preview: changed by fields (models.py), called by caller (use.py)"]
     )
     assert text.startswith(
-        "[breaking signature change: new required b; call site does not pass new required b]"
+        "[breaking signature change: new required b; call site use.py:3 on caller does not pass "
+        "new required b]"
     )
     assert "+    b: int" in text
     assert "    3 | P = Preview(a=1)" in text
+
+
+def test_static_checks_cover_every_call_site(tmp_path: Path) -> None:
+    from app.services.prefilter import static_checks
+
+    r = tmp_path / "sc"
+    r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    _git(r, "config", "user.email", "t@example.com")
+    _git(r, "config", "user.name", "Test")
+    (r / "svc.py").write_text("def make(x, ctx=None):\n    return x\n\n\ndef area(w, h):\n    return w * h\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-qm", "base")
+    _git(r, "checkout", "-q", "-b", "sig")
+    (r / "svc.py").write_text(
+        "def make(x, *, flag=False):\n    return x\n\n\ndef area(w, h):\n    r = w * h\n    return r\n"
+    )
+    _git(r, "commit", "-qam", "drop ctx, refactor area")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "checkout", "-q", "-b", "use")
+    (r / "app.py").write_text(
+        "from svc import area, make\n\nA = make(1)\nB = make(x=2)\nC = area(2, 3)\n"
+    )
+    (r / "bad.py").write_text("from svc import make\n\nA = make(1)\nB = make(2, ctx=3)\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-qm", "callers")
+    checks = {
+        (c.name, c.call_path): c
+        for c in static_checks(r, "main", [
+            "make: changed by sig (svc.py), called by use (app.py)",
+            "make: changed by sig (svc.py), called by use (bad.py)",
+            "area: changed by sig (svc.py), called by use (app.py)",
+        ])
+    }
+    ok = checks[("make", "app.py")]
+    assert ok.verdict == "compatible", ok
+    assert ok.detail.startswith("breaking signature change (removed ctx), but all 2 call site(s)")
+    bad = checks[("make", "bad.py")]
+    assert bad.verdict == "breaks"
+    assert bad.detail == "call site bad.py:4 on use still passes removed ctx"
+    assert checks[("area", "app.py")].verdict == "unknown"  # body-only change

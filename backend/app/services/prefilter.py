@@ -531,7 +531,7 @@ def _lines(source: str, node: ast.AST) -> list[str]:
     return source.splitlines()[start - 1 : end]
 
 
-def _first_call(tree: ast.AST, name: str) -> ast.Call | None:
+def _calls(tree: ast.AST, name: str) -> list[ast.Call]:
     calls = [
         n for n in ast.walk(tree)
         if isinstance(n, ast.Call) and (
@@ -539,39 +539,47 @@ def _first_call(tree: ast.AST, name: str) -> ast.Call | None:
             or (isinstance(n.func, ast.Attribute) and n.func.attr == name)
         )
     ]
-    return min(calls, key=lambda n: n.lineno) if calls else None
+    return sorted(calls, key=lambda n: (n.lineno, n.col_offset))
 
 
-def call_mismatch(call: ast.Call, old: ast.AST | None, new: ast.AST | None) -> str | None:
-    """Does this call site break against the new signature? Only for calls
-    whose arguments are all keywords (no ``*args`` / ``**kwargs``)."""
-    if old is None or new is None or call.args:
-        return None
-    if any(k.arg is None for k in call.keywords):
-        return None
+def _check_call(call: ast.Call, old: ast.AST | None, new: ast.AST | None) -> tuple[str | None, bool]:
+    """(mismatch description or None, whether the call could be checked).
+
+    A call is checkable when it has no ``*args`` / ``**kwargs`` and its
+    positional arguments map onto parameters whose order did not change.
+    """
+    if old is None or new is None:
+        return None, False
+    if any(isinstance(a, ast.Starred) for a in call.args) or any(
+        k.arg is None for k in call.keywords
+    ):
+        return None, False
     before, after = _params(old), _params(new)
-    passed = {k.arg for k in call.keywords}
+    n = len(call.args)
+    if n > len(before):
+        return None, False
+    positional = list(before)[:n]
+    if n and list(after)[:n] != positional:
+        return "positional parameters changed under a positional call", True
+    passed = {k.arg for k in call.keywords} | set(positional)
     missing = [k for k, req in after.items() if req and not before.get(k, False) and k not in passed]
     stale = [k for k in before if k not in after and k in passed]
     parts = []
     if missing:
-        parts.append("call site does not pass new required " + ", ".join(missing))
+        parts.append("does not pass new required " + ", ".join(missing))
     if stale:
-        parts.append("call site still passes removed " + ", ".join(stale))
-    return "; ".join(parts) or None
+        parts.append("still passes removed " + ", ".join(stale))
+    return ("; ".join(parts) or None), True
 
 
-def _call_site(source: str, tree: ast.AST, name: str, around: int = 3) -> str | None:
-    calls = [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and (
-            (isinstance(n.func, ast.Name) and n.func.id == name)
-            or (isinstance(n.func, ast.Attribute) and n.func.attr == name)
-        )
-    ]
-    if not calls:
-        return None
-    call = min(calls, key=lambda n: n.lineno)
+def call_mismatch(call: ast.Call, old: ast.AST | None, new: ast.AST | None) -> str | None:
+    """Does this call site break against the new signature? ``None`` when it
+    matches or cannot be checked (``*args`` / ``**kwargs``)."""
+    detail, _ = _check_call(call, old, new)
+    return f"call site {detail}" if detail else None
+
+
+def _call_site(source: str, call: ast.Call, around: int = 3) -> str:
     lines = source.splitlines()
     start = max(call.lineno - around, 1)
     end = min((getattr(call, "end_lineno", None) or call.lineno) + around, len(lines))
@@ -579,21 +587,55 @@ def _call_site(source: str, tree: ast.AST, name: str, around: int = 3) -> str | 
     return "\n".join(f"{i:5d} | {lines[i - 1]}" for i in range(start, end + 1))
 
 
-def evidence_snippets(
-    repo: Path, base_branch: str, evidence: list[str] | tuple[str, ...], max_items: int = 2
-) -> str:
-    """Code behind the top "changed by X, called by Y" evidence lines.
+@dataclass(frozen=True)
+class StaticCheck:
+    """Exact check of one "changed by X, called by Y" evidence line."""
 
-    For each item: the definition as it was on the merge-base vs. on the
-    branch that changed it (unified diff), and the call site on the other
-    branch. A call site that no longer matches the new signature comes first,
-    then breaking signature changes (a new required parameter / field, or a
-    removed one), then compatible ones, then body-only changes.
+    evidence: str
+    name: str
+    changer: str
+    def_path: str
+    caller: str
+    call_path: str
+    change: str | None  # caller-visible signature change, if any
+    verdict: str  # "breaks" | "compatible" | "unknown"
+    detail: str
+    snippet: str
+
+    @property
+    def rank(self) -> int:
+        if self.verdict == "breaks":
+            return 0
+        if self.change and self.change.startswith("breaking"):
+            return 1
+        return 2 if self.verdict == "unknown" else 3
+
+    @property
+    def label(self) -> str:
+        return f"{self.name}: {self.detail}"
+
+
+MAX_STATIC_CHECKS = 12
+
+
+def static_checks(
+    repo: Path, base_branch: str, evidence: list[str] | tuple[str, ...]
+) -> list[StaticCheck]:
+    """Parse both sides of each Python "changed by X, called by Y" evidence
+    line: how the definition's signature changed between the merge-base and
+    X, and whether EVERY call site in Y's file still matches it.
+
+    ``breaks``: some call site no longer matches (missing new required
+    parameter / field, or passes a removed one). ``compatible``: the
+    signature changed but every call site matches. ``unknown``: body-only
+    change, or a call that cannot be checked (``*args`` / ``**kwargs``).
     """
     import difflib
 
-    items: list[tuple[int, str]] = []
+    out: list[StaticCheck] = []
     for line in evidence:
+        if len(out) >= MAX_STATIC_CHECKS:
+            break
         m = _EVIDENCE_CALL.match(line)
         if not m:
             continue
@@ -612,26 +654,60 @@ def evidence_snippets(
         new_node = _find_def(new_tree, name) if new_tree else None
         if new_node is None or call_tree is None or new_src is None or call_src is None:
             continue
+        calls = _calls(call_tree, name)
+        if not calls:
+            continue
         old_node = _find_def(old_tree, name) if old_tree else None
         change = signature_change(old_node, new_node)
-        call = _first_call(call_tree, name)
-        mismatch = call_mismatch(call, old_node, new_node) if call is not None else None
-        if mismatch:
-            change = f"{change}; {mismatch}"
-        rank = (
-            0 if mismatch else 1 if change and change.startswith("breaking") else 2 if change else 3
-        )
+        checked = [(c, *_check_call(c, old_node, new_node)) for c in calls]
+        broken = [(c, d) for c, d, ok in checked if ok and d]
+        if broken:
+            call, detail = broken[0]
+            verdict = "breaks"
+            text = f"call site {call_path}:{call.lineno} on {caller} {detail}"
+            if len(broken) > 1:
+                text += f" ({len(broken)} call sites)"
+        elif change and all(ok for _, _, ok in checked):
+            call, verdict = calls[0], "compatible"
+            text = (
+                f"{change.split(':')[0]} ({change.split(': ', 1)[-1]}), but all "
+                f"{len(calls)} call site(s) in {call_path} on {caller} match the new signature"
+            )
+        else:
+            call, verdict = calls[0], "unknown"
+            text = f"{change or 'body changed'}; not decidable statically"
         old_lines = _lines(old_src, old_node) if old_node is not None and old_src else []
-        new_lines = _lines(new_src, new_node)
         diff = list(difflib.unified_diff(
-            old_lines, new_lines, f"{def_path} (merge-base)", f"{def_path} ({changer})",
-            n=3, lineterm="",
+            old_lines, _lines(new_src, new_node), f"{def_path} (merge-base)",
+            f"{def_path} ({changer})", n=3, lineterm="",
         ))[: MAX_SNIPPET_LINES + 2]
-        site = _call_site(call_src, call_tree, name)
-        if not diff or not site:
-            continue
-        head = f"[{change or 'body changed'}] {line}"
-        text = "\n".join([head, *diff, f"call site on {caller} ({call_path}):", site])
-        items.append((rank, text))
-    items.sort(key=lambda item: item[0])
-    return "\n\n".join(text for _, text in items[:max_items])
+        snippet = "\n".join([
+            *diff, f"call site on {caller} ({call_path}):", _call_site(call_src, call)
+        ]) if diff else ""
+        out.append(StaticCheck(line, name, changer, def_path, caller, call_path, change,
+                               verdict, text, snippet))
+    return out
+
+
+def evidence_snippets(
+    repo: Path, base_branch: str, evidence: list[str] | tuple[str, ...], max_items: int = 2
+) -> str:
+    """Code behind the top evidence lines: the definition as it was on the
+    merge-base vs. on the branch that changed it (unified diff), and the call
+    site on the other branch. Call sites that no longer match the new
+    signature come first, then breaking signature changes, then body-only
+    changes, then signature changes every call site still matches.
+    """
+    checks = sorted(
+        (c for c in static_checks(repo, base_branch, evidence) if c.snippet),
+        key=lambda c: c.rank,
+    )
+    items = []
+    for c in checks[:max_items]:
+        label = c.change or "body changed"
+        if c.verdict == "breaks":
+            label = f"{label}; {c.detail}"
+        elif c.verdict == "compatible":
+            label = f"{label}; every call site matches"
+        items.append(f"[{label}] {c.evidence}\n{c.snippet}")
+    return "\n\n".join(items)

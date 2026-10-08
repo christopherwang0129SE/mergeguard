@@ -43,7 +43,7 @@ from app.schemas import (
     UsageSummary,
     Verification,
 )
-from app.services import cache, git_service, nemotron, prefilter, verifier
+from app.services import cache, claims, git_service, nemotron, prefilter, verifier
 from app.services.nemotron import (
     NemotronError,
     build_pair_prompt,
@@ -204,6 +204,7 @@ def _apply_assessment(
 ) -> PairRisk:
     git_score = pair.git_score if pair.git_score is not None else pair.score
     published = combine_scores(git_score, risk_score, pair.overlapping_files)
+    unsupported = claims.unsupported_claims(rationale, pair.static_compatible)
     model_level = risk_level or _level(risk_score)
     return pair.model_copy(
         update={
@@ -216,6 +217,7 @@ def _apply_assessment(
             "model_rationale": rationale,
             "fallback_reason": None,
             "model_cached": cached,
+            "unsupported_claims": unsupported,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
         }
@@ -276,6 +278,21 @@ def _refine_one(
         prompt_tokens, completion_tokens = nemotron.usage_of(reply)
         meter.record_call(prompt_tokens, completion_tokens)
         assessment = parse_assessment(reply)
+        contradicted = claims.unsupported_claims(assessment.rationale, pair.static_compatible)
+        if contradicted:
+            # One repair round: show the model the exact static facts it contradicted.
+            try:
+                retry = nemotron.complete(claims.repair_prompt(prompt, reply, contradicted))
+                p_tok, c_tok = nemotron.usage_of(retry)
+                meter.record_call(p_tok, c_tok)
+                prompt_tokens += p_tok
+                completion_tokens += c_tok
+                assessment = parse_assessment(retry)
+            except NemotronError as exc:
+                if exc.prompt_tokens or exc.completion_tokens:
+                    meter.record_call(exc.prompt_tokens, exc.completion_tokens)
+                    prompt_tokens += exc.prompt_tokens
+                    completion_tokens += exc.completion_tokens
     except NemotronError as exc:
         if exc.prompt_tokens or exc.completion_tokens:
             meter.record_call(exc.prompt_tokens, exc.completion_tokens)
@@ -365,6 +382,21 @@ def _refine_with_model(
     return refined
 
 
+def _with_static_checks(repo: Path, base_branch: str, pair: PairRisk) -> PairRisk:
+    if not pair.prefilter_candidate or not pair.symbol_evidence:
+        return pair
+    try:
+        checks = prefilter.static_checks(repo, base_branch, pair.symbol_evidence)
+    except git_service.GitError:
+        return pair
+    return pair.model_copy(
+        update={
+            "static_breaks": [c.label for c in checks if c.verdict == "breaks"],
+            "static_compatible": [c.label for c in checks if c.verdict == "compatible"],
+        }
+    )
+
+
 def _verify_high_risk(
     repo: Path,
     base_branch: str,
@@ -375,7 +407,9 @@ def _verify_high_risk(
     allowed: bool,
 ) -> list[PairRisk]:
     limit = max(0, int(settings.verify_max_pairs))
-    chosen = [p for p in pairs if verifier.is_high_risk(p)][:limit]
+    eligible = [p for p in pairs if verifier.is_high_risk(p)]
+    eligible.sort(key=lambda p: (not p.static_breaks, -p.score))
+    chosen = eligible[:limit]
     chosen_ids = {(p.branch_a, p.branch_b) for p in chosen}
     out: list[PairRisk] = []
     for pair in pairs:
@@ -452,6 +486,7 @@ def analyze(
         )
         for p in pairs
     ]
+    pairs = [_with_static_checks(repo, base_branch, p) for p in pairs]
 
     skip = _model_skip_reason()
     if skip:

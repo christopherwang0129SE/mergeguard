@@ -38,7 +38,11 @@ SYSTEM_PROMPT = (
     "the diff heuristic cannot see — changed assumptions, operation order, "
     "invariants, incompatible edits to the same logic, signature changes "
     "versus call sites. The git heuristic is context only: it sees textual "
-    "hunk overlap and adjacency, not meaning. "
+    "hunk overlap and adjacency, not meaning. The static signature checks are "
+    "exact (both sides were parsed): a call site listed as not matching WILL "
+    "fail; never claim a signature break (TypeError, missing or removed "
+    "argument) for a symbol listed as compatible. In the rationale, name only "
+    "symbols and call sites that appear in the evidence. "
     "Reply with one JSON object and no other text, using this shape: "
     '{"risk_score": <number 0-100>, "risk_level": "none"|"low"|"medium"|"high", '
     '"rationale": "<one or two sentences>"}. '
@@ -344,6 +348,10 @@ def build_pair_prompt(
             + (", ".join(pair.symbol_overlap[:12]) if pair.symbol_overlap else "none")
         ),
         *[f"- {line}" for line in pair.symbol_evidence[:8]],
+        "Static signature checks (exact):",
+        *([f"- DOES NOT MATCH: {line}" for line in pair.static_breaks[:6]]
+          + [f"- compatible: {line}" for line in pair.static_compatible[:6]]
+          or ["- (no signature change between a changed definition and its callers)"]),
         "",
         f"Branch {pair.branch_a} (ahead {diff_a.ahead})",
         "Recent commits:",
