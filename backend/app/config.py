@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     # A confirmed verdict is authoritative: level high, shown score at least this.
     verify_confirmed_floor: float = 90.0
 
+    # Branch tests on the merge (no LLM): each branch's own added/modified test
+    # files run on the merge of A+B for prefilter-candidate pairs, wherever
+    # verify-by-test may run. BRANCH_TESTS_ENABLED=false turns it off.
+    branch_tests_enabled: bool = True
+    branch_tests_timeout_seconds: float = 120.0  # per pytest run
+    branch_tests_max_files: int = 20  # per branch
+    branch_tests_total_seconds: float = 600.0  # whole stage, per analysis
+    branch_tests_max_pairs: int = 6
+
     # --- Tavily (used later by the Resolver for doc lookups) ---
     tavily_api_key: str = ""
 

@@ -35,6 +35,7 @@ from app.config import settings
 from app.schemas import (
     AnalyzeResponse,
     BranchDiff,
+    BranchTests,
     ChangedFile,
     FallbackReason,
     FileCollision,
@@ -43,7 +44,7 @@ from app.schemas import (
     UsageSummary,
     Verification,
 )
-from app.services import cache, claims, git_service, nemotron, prefilter, verifier
+from app.services import branch_tests, cache, claims, git_service, nemotron, prefilter, verifier
 from app.services.nemotron import (
     NemotronError,
     build_pair_prompt,
@@ -430,6 +431,8 @@ def _verify_high_risk(
 
 
 CONFIRMED_NOTE = "raised: confirmed by test"
+BRANCH_TEST_NOTE = "raised: confirmed by branch test"
+BOTH_NOTE = "raised: confirmed by branch test and intent test"
 
 
 def apply_verification(pair: PairRisk, result: Verification) -> PairRisk:
@@ -450,6 +453,42 @@ def apply_verification(pair: PairRisk, result: Verification) -> PairRisk:
     return pair.model_copy(update=update)
 
 
+def apply_branch_tests(pair: PairRisk, result: BranchTests) -> PairRisk:
+    """Attach the branch-test result. ``confirmed`` is authoritative like an
+    intent-test confirmation: level high, score floored at
+    ``verify_confirmed_floor``; the note says which layer(s) confirmed."""
+    update: dict = {"branch_tests": result}
+    if result.status == "confirmed":
+        floor = float(settings.verify_confirmed_floor)
+        intent = pair.verification is not None and pair.verification.status == "confirmed"
+        update.update(
+            {
+                "blended_score": pair.blended_score if pair.blended_score is not None else pair.score,
+                "score": round(min(max(pair.score, floor), 100.0), 1),
+                "level": "high",
+                "score_note": BOTH_NOTE if intent else BRANCH_TEST_NOTE,
+            }
+        )
+    return pair.model_copy(update=update)
+
+
+def _run_branch_tests(repo: Path, base_branch: str, pairs: list[PairRisk]) -> dict:
+    """Stage 0, no LLM: each candidate pair's own test files on the merge."""
+    results: dict[tuple[str, str], BranchTests] = {}
+    budget = float(settings.branch_tests_total_seconds)
+    started = time.monotonic()
+    for pair in branch_tests.eligible_pairs(pairs):
+        key = (pair.branch_a, pair.branch_b)
+        if time.monotonic() - started >= budget:
+            results[key] = BranchTests(
+                status="skipped",
+                reason=f"branch-tests stage time budget ({budget:.0f}s) used up by earlier pairs",
+            )
+            continue
+        results[key] = branch_tests.check_pair(repo, base_branch, pair.branch_a, pair.branch_b)
+    return results
+
+
 def analyze(
     repo: Path,
     base_branch: str,
@@ -462,9 +501,10 @@ def analyze(
 ) -> AnalyzeResponse:
     """Score every branch pair (only pairs that include ``focus`` if given).
 
-    ``verify`` runs verify-by-test on high-risk model-scored pairs.
-    ``verify_allowed`` must be True for any generated test to execute: the
-    caller decides it (local repo under the allowed roots, never a URL clone).
+    ``verify`` runs the branch tests on the merge (no LLM, every candidate
+    pair) and verify-by-test on high-risk model-scored pairs.
+    ``verify_allowed`` must be True for any test to execute: the caller
+    decides it (local repo under the allowed roots, never a URL clone).
     """
     started = time.monotonic()
     meter = UsageMeter()
@@ -490,6 +530,11 @@ def analyze(
     ]
     pairs = [_with_static_checks(repo, base_branch, p) for p in pairs]
 
+    # Before and independent of the model: a low model score cannot suppress it.
+    branch_results: dict[tuple[str, str], BranchTests] = {}
+    if verify and verify_allowed and settings.branch_tests_enabled:
+        branch_results = _run_branch_tests(repo, base_branch, pairs)
+
     skip = _model_skip_reason()
     if skip:
         pairs = [pair.model_copy(update={"fallback_reason": skip}) for pair in pairs]
@@ -505,6 +550,14 @@ def analyze(
         )
         pairs.sort(key=lambda p: p.score, reverse=True)
 
+    if branch_results:
+        pairs = [
+            apply_branch_tests(p, branch_results[(p.branch_a, p.branch_b)])
+            if (p.branch_a, p.branch_b) in branch_results else p
+            for p in pairs
+        ]
+        pairs.sort(key=lambda p: p.score, reverse=True)
+
     risk_model = settings.nebius_model if any(p.score_source == "model" for p in pairs) else None
     usage = UsageSummary(
         **meter.summary_fields(),
@@ -518,6 +571,13 @@ def analyze(
         ),
         verify_confirmed=sum(
             1 for p in pairs if p.verification and p.verification.status == "confirmed"
+        ),
+        branch_test_pairs=sum(
+            1 for p in pairs
+            if p.branch_tests and p.branch_tests.status in ("confirmed", "passed", "error")
+        ),
+        branch_test_confirmed=sum(
+            1 for p in pairs if p.branch_tests and p.branch_tests.status == "confirmed"
         ),
         elapsed_s=round(time.monotonic() - started, 2),
     )

@@ -186,3 +186,22 @@ def test_engine_focus_scores_only_pairs_with_the_branch(repo: Path, monkeypatch:
     assert sorted((p.branch_a, p.branch_b) for p in res.pairs) == sorted(
         tuple(sorted(("feat/tax", b))) for b in ("docs/readme", "feat/cap", "feat/log"))
     assert len(sentinel.analyze(repo, "main", branches).pairs) == 6
+
+
+def test_pair_summary_labels_a_branch_test_confirmation() -> None:
+    from app.schemas import BranchTestFailure, BranchTests
+
+    bt = BranchTests(status="confirmed", reason="1 own test fails on the merge",
+                     confirming=[BranchTestFailure(test_id="tests.test_r::test_x", branch="feat/tax",
+                                                   file="tests/test_r.py", excerpt="E   KeyError")])
+    only_branch = tools.pair_summary(_pair("feat/log", "feat/tax", 90, "high", "suspected",
+                                           branch_tests=bt))
+    assert only_branch["verdict"] == "confirmed"
+    assert only_branch["confirmed_by"] == ["branch test"]
+    assert only_branch["verdict_reason"].startswith("branch test (existing tests, no LLM)")
+    assert only_branch["branch_test_failures"] == [
+        {"test_id": "tests.test_r::test_x", "branch": "feat/tax", "excerpt": "E   KeyError"}]
+    both = tools.pair_summary(_pair("feat/cap", "feat/tax", 92, "high", "confirmed", branch_tests=bt))
+    assert both["confirmed_by"] == ["branch test", "intent test"]
+    intent = tools.pair_summary(PAIRS[0])
+    assert intent["confirmed_by"] == ["intent test"] and intent["branch_test_failures"] == []

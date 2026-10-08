@@ -375,6 +375,11 @@ if _src and _work:
         for p in sys.path
     ]
 
+# Repo test files run like `python -m pytest`: the checkout itself is importable
+# (and found before an editable-install finder that points at the main checkout).
+if os.environ.get("MG_CWD_ON_PATH"):
+    sys.path.insert(0, os.getcwd())
+
 
 def _no_network(*_args, **_kwargs):
     raise OSError("network disabled by the MergeGuard verify sandbox")
@@ -558,11 +563,7 @@ def run_test(
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        out, _ = proc.communicate()
+        out = _kill_group(proc)
     duration = round(time.monotonic() - started, 2)
     text = (out or b"").decode("utf-8", errors="replace")
     text = text.replace(os.path.realpath(tmp_root), "<tmp>").replace(str(tmp_root), "<tmp>")
@@ -582,6 +583,16 @@ def run_test(
         cases=_junit_cases(report),
         failure_lines=_junit_failure_lines(report),
     )
+
+
+def _kill_group(proc: subprocess.Popen) -> bytes:
+    """Kill a timed-out test process and everything it started; return its output."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    out, _ = proc.communicate()
+    return out or b""
 
 
 def _collection_error(run: VerifyRun) -> bool:

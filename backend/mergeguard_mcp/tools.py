@@ -109,8 +109,25 @@ def scrub(value: Any) -> Any:
     return value
 
 
+def confirmed_by(pair: PairRisk) -> list[str]:
+    """Which layers confirmed the pair: the branches' own tests (deterministic,
+    no LLM) and/or the Nemotron-generated intent test."""
+    layers = []
+    if pair.branch_tests is not None and pair.branch_tests.status == "confirmed":
+        layers.append("branch test")
+    if pair.verification is not None and pair.verification.status == "confirmed":
+        layers.append("intent test")
+    return layers
+
+
 def verdict(pair: PairRisk) -> tuple[str, str]:
     v = pair.verification
+    bt = pair.branch_tests
+    if bt is not None and bt.status == "confirmed":
+        reason = "branch test (existing tests, no LLM): " + bt.reason
+        if v is not None and v.status == "confirmed":
+            reason += "; intent test (Nemotron): " + v.reason
+        return "confirmed", reason
     if v is None:
         return "not verified", "no generated test was run for this pair"
     if v.status == "skipped":
@@ -138,8 +155,14 @@ def pair_summary(pair: PairRisk, focus: str | None = None) -> dict[str, Any]:
         static_breaks=list(pair.static_breaks),
         unsupported_claims=list(pair.unsupported_claims),
         overlapping_files=pair.overlapping_files,
-        textual_merge_conflict=bool(v and v.merge_conflict),
+        textual_merge_conflict=bool((v and v.merge_conflict)
+                                    or (pair.branch_tests and pair.branch_tests.merge_conflict)),
+        confirmed_by=confirmed_by(pair),
         confirming_tests=list(v.confirming_tests) if v else [],
+        branch_test_failures=[
+            {"test_id": f.test_id, "branch": f.branch, "excerpt": f.excerpt}
+            for f in (pair.branch_tests.confirming if pair.branch_tests else [])
+        ],
         tokens=(pair.prompt_tokens + pair.completion_tokens
                 + ((v.prompt_tokens + v.completion_tokens) if v else 0)),
     )
@@ -158,6 +181,7 @@ def cost_summary(res: AnalyzeResponse) -> dict[str, Any]:
         "estimated_cost_usd": round(u.estimated_cost_usd, 6),
         "pairs_sent_to_model": u.pairs_sent_to_model,
         "pairs_verified": u.verify_pairs,
+        "pairs_branch_tested": u.branch_test_pairs,
         "elapsed_s": u.elapsed_s,
     }
 

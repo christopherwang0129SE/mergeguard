@@ -103,6 +103,55 @@ class Verification(BaseModel):
     completion_tokens: int = 0
 
 
+BranchTestStatus = Literal["confirmed", "passed", "skipped", "unsupported", "error"]
+
+
+class BranchTestRun(BaseModel):
+    """One pytest run of the branches' own test files on a checkout."""
+
+    target: Literal["a", "b", "base", "merge", "merge-rerun"]
+    ref: str
+    files: list[str] = Field(default_factory=list)
+    exit_code: int | None
+    passed: int = 0
+    failed: int = 0
+    errors: int = 0
+    timed_out: bool = False
+    duration_s: float = 0.0
+
+
+class BranchTestFailure(BaseModel):
+    """A branch's own test that passes on its branch and fails on the merge."""
+
+    test_id: str
+    branch: str  # whose test file it is ("both" if both branches changed it)
+    file: str
+    excerpt: str = ""
+
+
+class BranchTests(BaseModel):
+    """Deterministic check, no LLM: the test files each branch added or
+    modified, run on their own branch and on the merge of A+B.
+
+    ``confirmed``: at least one of those tests passes on its branch, fails on
+    the merge (twice) and does not already fail on the merge-base.
+    ``passed``: ran, no such test. ``skipped``: no test files changed, or a
+    textual merge conflict. ``unsupported``: only non-Python test files.
+    ``error``: could not run (see reason).
+    """
+
+    status: BranchTestStatus
+    reason: str = ""
+    files_a: list[str] = Field(default_factory=list)
+    files_b: list[str] = Field(default_factory=list)
+    unsupported_files: list[str] = Field(default_factory=list)
+    runs: list[BranchTestRun] = Field(default_factory=list)
+    confirming: list[BranchTestFailure] = Field(default_factory=list)
+    merge_conflict: bool = False
+    sandbox: str | None = None
+    duration_s: float = 0.0
+
+
 class PairRisk(BaseModel):
     branch_a: str
     branch_b: str
@@ -139,6 +188,8 @@ class PairRisk(BaseModel):
     completion_tokens: int = 0
     # Verify-by-test result (only for high-risk pairs on local/demo repos).
     verification: Verification | None = None
+    # Branch tests on the merge (deterministic, no LLM; local allowed repos only).
+    branch_tests: BranchTests | None = None
     # Set when something other than the git/model blend decided `score`/`level`,
     # e.g. "raised: confirmed by test". `blended_score` keeps the blend.
     score_note: str | None = None
@@ -164,6 +215,8 @@ class UsageSummary(BaseModel):
     top_k: int = 0
     verify_pairs: int = 0
     verify_confirmed: int = 0
+    branch_test_pairs: int = 0
+    branch_test_confirmed: int = 0
     elapsed_s: float = 0.0
 
 
