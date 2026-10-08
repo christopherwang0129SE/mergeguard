@@ -19,6 +19,8 @@ Cases (local repos under demo/, built if missing):
   (ThinkersJournal/KISS PR #311 x #315) and elastic
   (elastic/observability-migration-platform PR #381 x #383), built by
   demo/replay.py --case NAME; each PR pair is expected to be confirmed.
+  qwen-code (QwenLM/qwen-code PR #8947 x #8933) is TypeScript: verify-by-test
+  does not run there, so only the model triage is measured.
 
 A harmless pair must never be confirmed. Raw results go to
 backend/.workspace/eval/<timestamp>/ (gitignored).
@@ -80,6 +82,11 @@ CASES = [
     Case("elastic", DEMO / "elastic",
          [sys.executable, str(DEMO / "replay.py"), "--case", "elastic"],
          {frozenset({"pr-381-nested-agg-counter-ts", "pr-383-nested-legend-inner-group"})},
+         default=False),
+    # TypeScript: verify-by-test is Python-only, so this measures the triage alone.
+    Case("qwen-code", DEMO / "qwen-code",
+         [sys.executable, str(DEMO / "replay.py"), "--case", "qwen-code", "--no-venv"],
+         {frozenset({"pr-8947-acp-resource-guards", "pr-8933-restore-request-shapes"})},
          default=False),
 ]
 
