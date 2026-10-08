@@ -278,8 +278,11 @@ _src = os.environ.get("MG_SRC_ROOT")
 _work = os.environ.get("MG_WORK_ROOT")
 if _src and _work:
     _src = _src.rstrip("/") + "/"
+    _venv = os.path.realpath(sys.prefix).rstrip("/") + "/"  # the venv itself stays put
     sys.path[:] = [
-        _work.rstrip("/") + "/" + p[len(_src):] if (p + "/").startswith(_src) else p
+        _work.rstrip("/") + "/" + p[len(_src):]
+        if (p + "/").startswith(_src) and not (os.path.realpath(p) + "/").startswith(_venv)
+        else p
         for p in sys.path
     ]
 

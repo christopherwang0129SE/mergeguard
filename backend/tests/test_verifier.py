@@ -516,7 +516,7 @@ def test_project_venv_editable_installs_point_at_the_worktree(tmp_path: Path) ->
     work = tmp_path / "work"
     (work / "lib").mkdir(parents=True)
     (work / "lib" / "mod.py").write_text('VALUE = "worktree"\n')
-    venv = tmp_path / "venv"
+    venv = src / ".venv"  # like `uv sync`: the venv lives inside the repo
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
     site = next(venv.glob("lib/python3*/site-packages"))
     # pytest from the backend env, plus an "editable install" of src/lib.
@@ -524,8 +524,10 @@ def test_project_venv_editable_installs_point_at_the_worktree(tmp_path: Path) ->
         f"{sysconfig.get_paths()['purelib']}\n{src / 'lib'}\n"
     )
     (work / verifier.TEST_FILENAME).write_text(
-        "import mod\n\n\ndef test_branch_a_uses_worktree():\n"
+        "import os\nimport sys\n\nimport mod\n\n\ndef test_branch_a_uses_worktree():\n"
         "    assert mod.VALUE == 'worktree'\n"
+        "    # the venv's own site-packages must not be redirected\n"
+        "    assert all(os.path.isdir(p) for p in sys.path if p.endswith('site-packages'))\n"
     )
     tmp = tmp_path / "tmp"
     tmp.mkdir()
