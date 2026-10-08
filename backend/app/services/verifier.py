@@ -77,8 +77,7 @@ SYSTEM_PROMPT = (
     "intends. They must pass on branch B's code.\n"
     "Pick concrete inputs where the two changes interact, so that if both "
     "branches are merged the combined code would violate at least one of these "
-    "intents. Each branch's tests must capture what THAT branch changed: they "
-    "should fail on the base branch code. Do not only test helpers in isolation: call the shared entry "
+    "intents. Do not only test helpers in isolation: call the shared entry "
     "point that both changes affect (for example the function one branch edits "
     "that calls the function the other branch edits), with inputs that trigger "
     "BOTH changes at once (exceed any new cap, limit or threshold, and depend on "
@@ -462,12 +461,20 @@ class _Worktrees:
 # ---------------------------------------------------------------------------
 
 
-def _generate(prompt: str) -> _Generated:
+# Reasoning budget for test generation. If the model still runs out of tokens
+# while reasoning, the next attempt turns reasoning off (fast, and the repair
+# round feeds back real pytest output anyway).
+VERIFY_MAX_TOKENS = 16384
+NO_THINKING = {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def _generate(prompt: str, *, thinking: bool = True) -> _Generated:
     reply = nemotron.complete(
         prompt,
         system_prompt=SYSTEM_PROMPT,
-        max_tokens=8192,
+        max_tokens=VERIFY_MAX_TOKENS,
         timeout=settings.verify_llm_timeout_seconds,
+        extra_body=None if thinking else NO_THINKING,
     )
     prompt_tokens, completion_tokens = nemotron.usage_of(reply)
     return _Generated(extract_code(reply), prompt_tokens, completion_tokens)
@@ -581,6 +588,7 @@ def verify_pair(
     attempts = 0
     runs: list[VerifyRun] = []
     last_code: str | None = None
+    thinking = True
     max_attempts = max(1, int(settings.verify_max_attempts))
 
     try:
@@ -593,13 +601,15 @@ def verify_pair(
                         break
                     attempts += 1
                     try:
-                        gen = _generate(next_prompt)
+                        gen = _generate(next_prompt, thinking=thinking)
                     except NemotronError as exc:
                         meter.record_call(exc.prompt_tokens, exc.completion_tokens)
                         tokens[0] += exc.prompt_tokens
                         tokens[1] += exc.completion_tokens
-                        if attempts < max_attempts and last_code is None:
-                            continue  # e.g. reasoning ran out of tokens: try once more
+                        if "finish_reason=length" in exc.detail:
+                            thinking = False  # reasoning ate the budget: answer directly
+                        if attempts < max_attempts:
+                            continue  # retry (without reasoning if it ran out of tokens)
                         if last_code is None:
                             return finish("error", f"model: {exc.detail or exc.code}",
                                           attempts=attempts)

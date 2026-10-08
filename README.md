@@ -123,9 +123,11 @@ throwaway `git worktree`s:
   passes on the merge). `error`: no usable test could be generated or run.
   `skipped`: not eligible (for example not a local repo under the allowed roots).
 
-If the first test fails on its own branch, or does not exercise the
-interaction, Nemotron gets one repair round with the real pytest output
-(`VERIFY_MAX_ATTEMPTS`, default 2). The generated test, per-checkout pass/fail
+If a test fails on its own branch, or does not exercise the interaction,
+Nemotron gets a repair round with the real pytest output
+(`VERIFY_MAX_ATTEMPTS`, default 3 generations in total). If Nemotron's
+reasoning runs out of its token budget, the next attempt is made with
+reasoning turned off. The generated test, per-checkout pass/fail
 counts and per-test outcomes, trimmed pytest output, attempts, tokens and the
 artifact path (`WORKSPACE_DIR/verify/<key>/`) are returned under
 `pairs[].verification`. The test text is cached with the same SHA-based key, so

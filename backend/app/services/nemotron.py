@@ -115,6 +115,7 @@ def complete(
     system_prompt: str | None = None,
     max_tokens: int = 2048,
     timeout: float | None = None,
+    extra_body: dict | None = None,
 ) -> str:
     """Call Token Factory chat completions once. No retries.
 
@@ -136,6 +137,7 @@ def complete(
             top_p=1,
             seed=42,
             max_tokens=max_tokens,
+            **({"extra_body": extra_body} if extra_body else {}),
             messages=[
                 {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},

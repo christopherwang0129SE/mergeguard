@@ -195,7 +195,7 @@ def test_suspected_when_merge_also_passes(vrepo: Path, monkeypatch: pytest.Monke
     assert result.reason == "generated test also passes on the merge"
     assert result.runs[-1].failed == 0
     # One sharpening round was attempted with the merge result as feedback.
-    assert len(prompts) == settings.verify_max_attempts == 2
+    assert len(prompts) == settings.verify_max_attempts == 3
     assert "does not exercise the interaction" in prompts[1]
 
 
@@ -431,3 +431,26 @@ def test_empty_model_reply_is_retried_and_tokens_are_counted(
     assert result.attempts == 2
     assert meter.llm_calls == 2
     assert (result.prompt_tokens, result.completion_tokens) == (1700, 8492)
+
+
+def test_reasoning_overflow_retries_without_thinking_even_after_a_test_ran(
+    vrepo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services.nemotron import NemotronError
+
+    seen: list[dict | None] = []
+
+    def fake(prompt: str, **kwargs) -> str:
+        seen.append(kwargs.get("extra_body"))
+        if len(seen) == 1:
+            return LLMText(f"```python\n{WRONG_ON_A}```", 900, 300)
+        if len(seen) == 2:
+            raise NemotronError("model_error", "empty model response (finish_reason=length)", 2000, 16384)
+        return LLMText(f"```python\n{GOOD_TEST}```", 900, 300)
+
+    monkeypatch.setattr("app.services.nemotron.complete", fake)
+    result = verifier.verify_pair(vrepo, "main", _pair())
+    assert result.status == "confirmed"
+    assert result.attempts == 3
+    assert seen[0] is None and seen[1] is None
+    assert seen[2] == verifier.NO_THINKING
