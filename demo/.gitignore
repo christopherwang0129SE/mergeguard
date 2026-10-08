@@ -1,6 +1,9 @@
 # The demo repo is generated locally by make_demo_repo.py and is not committed.
 checkout-demo/
 
-# Real-world replay (demo/replay_case_1.py): public repo clone + venv, not committed.
+# Real-world replays (demo/replay.py --case NAME): public repo clones + venvs, not committed.
 real-case-1/
+kiss/
+elastic/
+qwen-code/
 harmless-demo/
