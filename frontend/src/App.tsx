@@ -4,8 +4,12 @@ import { analyzeRepo, checkHealth } from './services/api';
 import { classifyRepoInput } from './utils/repo';
 import { BranchLights } from './components/BranchLights';
 import { PairTable } from './components/PairTable';
+import { SummaryBar } from './components/SummaryBar';
 import { AgentStatus } from './components/AgentStatus';
 import './App.css';
+
+// Demo repo path, injected by Vite (see vite.config.ts `define`).
+const DEMO_REPO_PATH: string = import.meta.env.VITE_DEMO_REPO_PATH ?? '';
 
 function App() {
   const [repoInput, setRepoInput] = useState('');
@@ -27,7 +31,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    // Fetch health on mount so the agent panel reflects /api/health before any
+    // Fetch health on mount so the agent strip reflects /api/health before any
     // analyze. fetchHealth is async, so setHealth runs after the await, not
     // synchronously in the effect.
     // eslint-disable-next-line react/set-state-in-effect
@@ -57,55 +61,75 @@ function App() {
     }
   };
 
+  const handleTryDemo = () => {
+    if (DEMO_REPO_PATH) {
+      setRepoInput(DEMO_REPO_PATH);
+      setError(null);
+    }
+  };
+
   return (
-    <>
-      <section id="dashboard">
+    <div id="dashboard">
+      <header className="app-header">
         <div className="container">
-          <h1>MergeGuard Dashboard</h1>
-          <form onSubmit={handleSubmit} className="input-form">
+          <div className="header-row">
             <div>
-              <label>
-                Repository path or URL:
-                <input
-                  type="text"
-                  placeholder="/path/to/repo or https://github.com/org/repo.git"
-                  value={repoInput}
-                  onChange={(e) => setRepoInput(e.target.value)}
-                />
-              </label>
+              <h1>MergeGuard</h1>
+              <p className="tagline">
+                Predicts merge conflicts between parallel branches before you merge.
+              </p>
             </div>
-            <div>
-              <label>
-                Base Branch:
-                <input
-                  type="text"
-                  placeholder="main"
-                  value={baseBranch}
-                  onChange={(e) => setBaseBranch(e.target.value)}
-                />
-              </label>
-            </div>
-            <button type="submit" disabled={loading}>
-              {loading ? 'Analyzing...' : 'Analyze'}
-            </button>
-          </form>
-
-          {error && <div className="error">{error}</div>}
-
-          {loading && !response && <div className="loading">Loading...</div>}
-
-          {response && (
-            <>
-              <BranchLights branches={response.branches} pairs={response.pairs} />
-              <PairTable pairs={response.pairs} risk_model={response.risk_model ?? null} />
-            </>
-          )}
-
-          {/* Agent panel is driven by /api/health and shows before any analyze. */}
-          <AgentStatus health={health} />
+            <AgentStatus health={health} />
+          </div>
         </div>
-      </section>
-    </>
+      </header>
+
+      <main className="container">
+        <form onSubmit={handleSubmit} className="input-form" noValidate>
+          <div className="field field-repo">
+            <label htmlFor="repo-input">Repository path or URL</label>
+            <input
+              id="repo-input"
+              type="text"
+              placeholder="/path/to/repo or https://github.com/org/repo.git"
+              value={repoInput}
+              onChange={(e) => setRepoInput(e.target.value)}
+            />
+          </div>
+          <div className="field field-base">
+            <label htmlFor="base-input">Base branch</label>
+            <input
+              id="base-input"
+              type="text"
+              placeholder="main"
+              value={baseBranch}
+              onChange={(e) => setBaseBranch(e.target.value)}
+            />
+          </div>
+          <button type="button" className="btn-secondary" onClick={handleTryDemo}>
+            Try demo repo
+          </button>
+          <button type="submit" className="btn-primary" disabled={loading}>
+            {loading ? 'Analyzing...' : 'Analyze'}
+          </button>
+        </form>
+        <p className="form-hint">
+          Point at a repo. Sentinel diffs every branch against main. Nemotron explains each risky pair.
+        </p>
+
+        {error && <div className="error">{error}</div>}
+
+        {loading && !response && <div className="loading">Loading...</div>}
+
+        {response && (
+          <>
+            <SummaryBar pairs={response.pairs} />
+            <BranchLights branches={response.branches} pairs={response.pairs} />
+            <PairTable pairs={response.pairs} risk_model={response.risk_model ?? null} />
+          </>
+        )}
+      </main>
+    </div>
   );
 }
 
