@@ -57,6 +57,6 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         raise HTTPException(400, f"No branches to analyze (base={base}).")
 
     try:
-        return sentinel.analyze(repo, base, branches)
+        return sentinel.analyze(repo, base, branches, use_cache=req.use_cache)
     except git_service.GitError as e:
         raise HTTPException(400, str(e)) from e

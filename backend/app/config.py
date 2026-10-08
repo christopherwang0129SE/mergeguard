@@ -20,8 +20,13 @@ class Settings(BaseSettings):
     nebius_enabled: bool = True
     # Single attempt. The OpenAI client is constructed with max_retries=0.
     nebius_timeout_seconds: float = 40.0
-    # Highest-risk pairs (by git score) that may receive a model call per request.
-    nebius_max_pairs: int = 6
+    # Top-K: after the static prefilter (shared files / symbol overlap), only
+    # the K highest-signal pairs may receive a model call per request.
+    nebius_max_pairs: int = 5
+
+    # Nemotron 3 Super listed price (USD per 1M tokens). Config constants.
+    nemotron_input_usd_per_1m: float = 0.30
+    nemotron_output_usd_per_1m: float = 0.90
 
     # --- Tavily (used later by the Resolver for doc lookups) ---
     tavily_api_key: str = ""

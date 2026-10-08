@@ -10,11 +10,15 @@ from app.config import settings
 
 
 @pytest.fixture(autouse=True)
-def _isolate_nebius_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ignore a developer .env so tests never hit Token Factory by accident."""
+def _isolate_nebius_settings(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
+    """Ignore a developer .env so tests never hit Token Factory by accident.
+
+    Each test also gets its own cache dir so cached model results never leak.
+    """
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path_factory.mktemp("ws")))
     monkeypatch.setattr(settings, "nebius_api_key", "")
     monkeypatch.setattr(settings, "nebius_enabled", True)
-    monkeypatch.setattr(settings, "nebius_max_pairs", 6)
+    monkeypatch.setattr(settings, "nebius_max_pairs", 5)
     monkeypatch.setattr(settings, "nebius_timeout_seconds", 40.0)
     monkeypatch.setattr(settings, "nebius_model", "nvidia/nemotron-3-super-120b-a12b")
     monkeypatch.setattr(

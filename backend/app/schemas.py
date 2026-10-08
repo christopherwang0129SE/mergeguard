@@ -18,6 +18,7 @@ class AnalyzeRequest(BaseModel):
     branches: list[str] | None = Field(
         None, description="Branches to compare. Defaults to all non-base local branches."
     )
+    use_cache: bool = Field(True, description="Reuse cached Nemotron results for identical SHAs.")
 
 
 class ChangedFile(BaseModel):
@@ -48,7 +49,9 @@ class FileCollision(BaseModel):
 RiskLevel = Literal["none", "low", "medium", "high"]
 ScoreSource = Literal["model", "git"]
 # Why a pair kept the git score. Absent when `score_source` is `model`.
-FallbackReason = Literal["no_api_key", "disabled", "pair_cap", "model_error", "unparsable"]
+FallbackReason = Literal[
+    "no_api_key", "disabled", "prefiltered", "pair_cap", "model_error", "unparsable"
+]
 
 
 class PairRisk(BaseModel):
@@ -69,6 +72,33 @@ class PairRisk(BaseModel):
     model_level: RiskLevel | None = None
     model_rationale: str | None = None
     fallback_reason: FallbackReason | None = None
+    # Static prefilter signal (cheap, before any LLM call).
+    symbol_overlap: list[str] = Field(default_factory=list)
+    prefilter_candidate: bool = True
+    # Model call accounting for this pair (0 tokens when served from cache).
+    model_cached: bool = False
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+class UsageSummary(BaseModel):
+    """LLM cost accounting for one /api/analyze request."""
+
+    model: str
+    llm_calls: int = 0
+    cache_hits: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    input_usd_per_1m: float
+    output_usd_per_1m: float
+    pairs_total: int = 0
+    pairs_prefiltered: int = 0
+    pairs_sent_to_model: int = 0
+    pairs_capped: int = 0
+    top_k: int = 0
+    elapsed_s: float = 0.0
 
 
 class AnalyzeResponse(BaseModel):
@@ -78,3 +108,4 @@ class AnalyzeResponse(BaseModel):
     pairs: list[PairRisk]
     # Set when at least one pair's published score used the model.
     risk_model: str | None = None
+    usage: UsageSummary | None = None

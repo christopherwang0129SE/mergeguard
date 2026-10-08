@@ -58,7 +58,8 @@ and set:
 | `NEBIUS_MODEL` | Default `nvidia/nemotron-3-super-120b-a12b`. |
 | `NEBIUS_ENABLED` | `false` forces the git scorer even when a key is set. |
 | `NEBIUS_TIMEOUT_SECONDS` | One chat-completions attempt. The client does not retry. Default 40. |
-| `NEBIUS_MAX_PAIRS` | Cap on model calls per `/api/analyze`. The highest git scores are sent first. Default 6. |
+| `NEBIUS_MAX_PAIRS` | Top-K: cap on model calls per `/api/analyze` after the static prefilter. Highest signal first (overlapping files, symbol overlap, shared files, git score). Default 5. |
+| `NEMOTRON_INPUT_USD_PER_1M` / `NEMOTRON_OUTPUT_USD_PER_1M` | Listed Nemotron 3 Super price used for the `$` estimate. Defaults 0.30 / 0.90. |
 
 For each selected pair the model receives a bounded prompt: both branches'
 changed files, overlapping or adjacent hunks, a trimmed diff excerpt, and a
@@ -76,6 +77,26 @@ If the call errors, times out, or returns something that is not that JSON, the
 pair keeps the git score, `score_source` stays `"git"`, and `fallback_reason`
 is `"model_error"` or `"unparsable"`. Pairs past the cap use `"pair_cap"`.
 `NEBIUS_ENABLED=false` uses `"disabled"`. The HTTP request still succeeds.
+
+### Cost-aware pipeline
+
+1. **Static prefilter (no LLM).** For every branch, Sentinel extracts the
+   functions/classes it changed and the names it calls from changed code
+   (Python via `ast`; other languages via a `def`/`function`/`func`/`fn` regex
+   heuristic). A pair is a model candidate only if the branches share a file
+   or one branch changes a symbol the other changes or calls (PR A edits
+   `def f`, PR B calls `f`). Other pairs get `fallback_reason: "prefiltered"`
+   and never reach the model. Each pair carries `symbol_overlap`.
+2. **Top-K.** Only the `NEBIUS_MAX_PAIRS` (default 5) strongest candidates
+   are sent to Nemotron; the rest get `"pair_cap"`.
+3. **Disk cache.** Model results are cached under
+   `WORKSPACE_DIR/nemotron-cache/`, keyed by (base sha, head A sha, head B sha,
+   model, prompt version). An identical re-run makes **0 LLM calls**. Send
+   `"use_cache": false` in the request to force fresh calls.
+4. **Accounting.** The response has `usage`: `llm_calls`, `cache_hits`,
+   `prompt_tokens`, `completion_tokens`, `total_tokens`,
+   `estimated_cost_usd`, prefilter/top-K counts, and `elapsed_s`. The dashboard
+   summary bar shows calls, tokens, and estimated $.
 
 ## Tests
 

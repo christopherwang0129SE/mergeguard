@@ -5,9 +5,17 @@ with the integration branch. For every branch *pair* we look at the files both
 touch, and within those files whether their changed line-ranges overlap or sit
 close together. That yields a 0-100 git risk score with an explainable rationale.
 
+Cost-aware pipeline. Before any LLM call a cheap static prefilter
+(``app/services/prefilter.py``) keeps only pairs that share a file or whose
+changed symbols overlap (A edits ``def f``, B calls ``f``). Harmless pairs are
+marked ``fallback_reason="prefiltered"`` and never reach the model. The top K
+candidates (``NEBIUS_MAX_PAIRS``, default 5) are sent to NVIDIA Nemotron on
+Token Factory; results are cached on disk keyed by (base sha, head shas,
+model, prompt version), so an identical re-run makes zero LLM calls. Token
+usage and estimated $ are returned in ``usage``.
+
 When Nebius is configured (``NEBIUS_API_KEY`` set and ``NEBIUS_ENABLED``), the
-highest-scoring pairs — up to ``NEBIUS_MAX_PAIRS`` — are also sent to NVIDIA
-Nemotron on Token Factory. The published score is an equal blend of the git
+selected pairs are sent to NVIDIA Nemotron. The published score is an equal blend of the git
 score and the model's ``risk_score``. If the hunks overlap, the blend cannot
 fall below the git score: the model may raise a textual collision, not dismiss
 it. When they do not overlap, the blend can move either way so a semantic clash
@@ -19,6 +27,7 @@ the reply is not a usable JSON assessment, that pair keeps the git score and
 """
 from __future__ import annotations
 
+import time
 from itertools import combinations
 from pathlib import Path
 
@@ -31,13 +40,15 @@ from app.schemas import (
     FileCollision,
     PairRisk,
     RiskLevel,
+    UsageSummary,
 )
-from app.services import git_service
+from app.services import cache, git_service, nemotron, prefilter
 from app.services.nemotron import (
     NemotronError,
-    assess_pair,
     build_pair_prompt,
+    parse_assessment,
 )
+from app.services.usage import UsageMeter
 
 # Two changed regions within this many lines of each other are treated as
 # colliding — git conflicts arise from adjacency, not just exact overlap.
@@ -172,12 +183,74 @@ def _excerpt(repo: Path, base_branch: str, pair: PairRisk) -> str:
     return "\n".join(chunks)
 
 
+def _apply_assessment(
+    pair: PairRisk,
+    *,
+    risk_score: float,
+    rationale: str,
+    risk_level: RiskLevel | None,
+    cached: bool,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> PairRisk:
+    git_score = pair.git_score if pair.git_score is not None else pair.score
+    published = combine_scores(git_score, risk_score, pair.overlapping_files)
+    model_level = risk_level or _level(risk_score)
+    return pair.model_copy(
+        update={
+            "score": published,
+            "level": _level(published),
+            "rationale": rationale,
+            "score_source": "model",
+            "model_score": risk_score,
+            "model_level": model_level,
+            "model_rationale": rationale,
+            "fallback_reason": None,
+            "model_cached": cached,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }
+    )
+
+
+def _sha(repo: Path, ref: str) -> str:
+    try:
+        return git_service.rev_parse(repo, ref)
+    except git_service.GitError:
+        return ref
+
+
 def _refine_one(
     repo: Path,
     base_branch: str,
     diff_by_branch: dict[str, BranchDiff],
     pair: PairRisk,
+    *,
+    meter: UsageMeter | None = None,
+    use_cache: bool = True,
 ) -> PairRisk:
+    meter = meter or UsageMeter()
+    key = cache.cache_key(
+        base_sha=_sha(repo, base_branch),
+        head_a=_sha(repo, pair.branch_a),
+        head_b=_sha(repo, pair.branch_b),
+        model=settings.nebius_model,
+    )
+    if use_cache:
+        hit = cache.get(key)
+        if hit is not None:
+            meter.record_cache_hit()
+            level = hit.risk_level if hit.risk_level in ("none", "low", "medium", "high") else None
+            return _apply_assessment(
+                pair,
+                risk_score=hit.risk_score,
+                rationale=hit.rationale,
+                risk_level=level,  # type: ignore[arg-type]
+                cached=True,
+                prompt_tokens=0,
+                completion_tokens=0,
+            )
+
     diff_a = diff_by_branch[pair.branch_a]
     diff_b = diff_by_branch[pair.branch_b]
     try:
@@ -190,28 +263,58 @@ def _refine_one(
             commits_b=_commits(repo, pair.branch_b),
             excerpt=_excerpt(repo, base_branch, pair),
         )
-        assessment = assess_pair(prompt)
+        reply = nemotron.complete(prompt)
+        prompt_tokens, completion_tokens = nemotron.usage_of(reply)
+        meter.record_call(prompt_tokens, completion_tokens)
+        assessment = parse_assessment(reply)
     except NemotronError as exc:
         reason: FallbackReason = "unparsable" if exc.code == "unparsable" else "model_error"
         return pair.model_copy(update={"fallback_reason": reason})
     except Exception:
         return pair.model_copy(update={"fallback_reason": "model_error"})
 
-    git_score = pair.git_score if pair.git_score is not None else pair.score
-    published = combine_scores(git_score, assessment.risk_score, pair.overlapping_files)
-    model_level = assessment.risk_level or _level(assessment.risk_score)
-    return pair.model_copy(
-        update={
-            "score": published,
-            "level": _level(published),
-            "rationale": assessment.rationale,
-            "score_source": "model",
-            "model_score": assessment.risk_score,
-            "model_level": model_level,
-            "model_rationale": assessment.rationale,
-            "fallback_reason": None,
-        }
+    cache.put(
+        key,
+        cache.from_payload(
+            {
+                "risk_score": assessment.risk_score,
+                "rationale": assessment.rationale,
+                "risk_level": assessment.risk_level,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "estimated_cost_usd": nemotron.estimate_cost_usd(prompt_tokens, completion_tokens),
+            },
+            model=settings.nebius_model,
+        ),
     )
+    return _apply_assessment(
+        pair,
+        risk_score=assessment.risk_score,
+        rationale=assessment.rationale,
+        risk_level=assessment.risk_level,
+        cached=False,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+
+
+def _prefilter_signals(
+    repo: Path,
+    diff_by_branch: dict[str, BranchDiff],
+    pairs: list[PairRisk],
+) -> dict[tuple[str, str], prefilter.PairSignal]:
+    symbols = {
+        branch: prefilter.branch_symbols(repo, diff) for branch, diff in diff_by_branch.items()
+    }
+    signals: dict[tuple[str, str], prefilter.PairSignal] = {}
+    for pair in pairs:
+        signals[(pair.branch_a, pair.branch_b)] = prefilter.PairSignal(
+            shared_files=pair.shared_files,
+            overlapping_files=pair.overlapping_files,
+            symbols=prefilter.symbol_overlap(symbols[pair.branch_a], symbols[pair.branch_b]),
+        )
+    return signals
 
 
 def _refine_with_model(
@@ -219,15 +322,31 @@ def _refine_with_model(
     base_branch: str,
     diff_by_branch: dict[str, BranchDiff],
     pairs: list[PairRisk],
+    *,
+    meter: UsageMeter | None = None,
+    use_cache: bool = True,
 ) -> list[PairRisk]:
-    """Call the model for the top ``nebius_max_pairs`` pairs by git score."""
+    """Send only prefilter candidates, top K by signal, to the model."""
     limit = max(0, int(settings.nebius_max_pairs))
+    candidates = [p for p in pairs if p.prefilter_candidate]
+    candidates.sort(
+        key=lambda p: (p.overlapping_files, len(p.symbol_overlap), p.shared_files, p.score),
+        reverse=True,
+    )
+    selected = {(p.branch_a, p.branch_b) for p in candidates[:limit]}
     refined: list[PairRisk] = []
-    for index, pair in enumerate(pairs):
-        if index >= limit:
+    for pair in pairs:
+        ident = (pair.branch_a, pair.branch_b)
+        if not pair.prefilter_candidate:
+            refined.append(pair.model_copy(update={"fallback_reason": "prefiltered"}))
+        elif ident not in selected:
             refined.append(pair.model_copy(update={"fallback_reason": "pair_cap"}))
-            continue
-        refined.append(_refine_one(repo, base_branch, diff_by_branch, pair))
+        else:
+            refined.append(
+                _refine_one(
+                    repo, base_branch, diff_by_branch, pair, meter=meter, use_cache=use_cache
+                )
+            )
     return refined
 
 
@@ -235,7 +354,11 @@ def analyze(
     repo: Path,
     base_branch: str,
     branches: list[str],
+    *,
+    use_cache: bool = True,
 ) -> AnalyzeResponse:
+    started = time.monotonic()
+    meter = UsageMeter()
     diffs = [git_service.diff_against_base(repo, b, base_branch) for b in branches]
     diff_by_branch = {d.branch: d for d in diffs}
 
@@ -244,18 +367,41 @@ def analyze(
         pairs.append(_score_pair(diff_by_branch[a], diff_by_branch[b]))
     pairs.sort(key=lambda p: p.score, reverse=True)
 
+    signals = _prefilter_signals(repo, diff_by_branch, pairs)
+    pairs = [
+        p.model_copy(
+            update={
+                "symbol_overlap": list(signals[(p.branch_a, p.branch_b)].symbols),
+                "prefilter_candidate": signals[(p.branch_a, p.branch_b)].is_candidate,
+            }
+        )
+        for p in pairs
+    ]
+
     skip = _model_skip_reason()
     if skip:
         pairs = [pair.model_copy(update={"fallback_reason": skip}) for pair in pairs]
     else:
-        pairs = _refine_with_model(repo, base_branch, diff_by_branch, pairs)
+        pairs = _refine_with_model(
+            repo, base_branch, diff_by_branch, pairs, meter=meter, use_cache=use_cache
+        )
         pairs.sort(key=lambda p: p.score, reverse=True)
 
     risk_model = settings.nebius_model if any(p.score_source == "model" for p in pairs) else None
+    usage = UsageSummary(
+        **meter.summary_fields(),
+        pairs_total=len(pairs),
+        pairs_prefiltered=sum(1 for p in pairs if not p.prefilter_candidate),
+        pairs_sent_to_model=sum(1 for p in pairs if p.score_source == "model"),
+        pairs_capped=sum(1 for p in pairs if p.fallback_reason == "pair_cap"),
+        top_k=max(0, int(settings.nebius_max_pairs)),
+        elapsed_s=round(time.monotonic() - started, 2),
+    )
     return AnalyzeResponse(
         base_branch=base_branch,
         branches=branches,
         diffs=diffs,
         pairs=pairs,
         risk_model=risk_model,
+        usage=usage,
     )

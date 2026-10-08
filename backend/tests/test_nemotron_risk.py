@@ -36,7 +36,7 @@ def test_defaults_point_at_nemotron_on_token_factory() -> None:
     base_url = Settings.model_fields["nebius_base_url"].default
     assert base_url == "https://api.tokenfactory.nebius.com/v1/"
     assert Settings.model_fields["nebius_enabled"].default is True
-    assert Settings.model_fields["nebius_max_pairs"].default == 6
+    assert Settings.model_fields["nebius_max_pairs"].default == 5
 
 
 def test_parse_assessment_accepts_fenced_json_after_think() -> None:

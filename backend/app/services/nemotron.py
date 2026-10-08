@@ -74,8 +74,46 @@ def _safe_detail(exc: BaseException) -> str:
     return text[:180]
 
 
-def complete(user_prompt: str) -> str:
-    """Call Token Factory chat completions once. No retries."""
+class LLMText(str):
+    """Model reply text that also carries token usage (0 when unknown)."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    def __new__(cls, text: str, prompt_tokens: int = 0, completion_tokens: int = 0) -> "LLMText":
+        obj = super().__new__(cls, text)
+        obj.prompt_tokens = int(prompt_tokens or 0)
+        obj.completion_tokens = int(completion_tokens or 0)
+        return obj
+
+
+def usage_of(text: str) -> tuple[int, int]:
+    """(prompt_tokens, completion_tokens) for a reply; (0, 0) when unknown."""
+    return (
+        int(getattr(text, "prompt_tokens", 0) or 0),
+        int(getattr(text, "completion_tokens", 0) or 0),
+    )
+
+
+def estimate_cost_usd(prompt_tokens: int, completion_tokens: int) -> float:
+    """Listed Nemotron 3 Super price (see config) applied to token counts."""
+    cost = (
+        prompt_tokens * settings.nemotron_input_usd_per_1m
+        + completion_tokens * settings.nemotron_output_usd_per_1m
+    ) / 1_000_000
+    return round(cost, 8)
+
+
+def complete(
+    user_prompt: str,
+    *,
+    system_prompt: str | None = None,
+    max_tokens: int = 2048,
+) -> str:
+    """Call Token Factory chat completions once. No retries.
+
+    Returns an :class:`LLMText` (a ``str``) carrying the token usage.
+    """
     if not settings.nebius_api_key.strip():
         raise NemotronError("model_error", "NEBIUS_API_KEY is empty")
 
@@ -91,9 +129,9 @@ def complete(user_prompt: str) -> str:
             temperature=0,
             top_p=1,
             seed=42,
-            max_tokens=2048,
+            max_tokens=max_tokens,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
         )
@@ -118,7 +156,12 @@ def complete(user_prompt: str) -> str:
         content = "".join(parts)
     if not isinstance(content, str) or not content.strip():
         raise NemotronError("model_error", "empty model response")
-    return content
+    usage = getattr(completion, "usage", None)
+    return LLMText(
+        content,
+        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+    )
 
 
 def assess_pair(prompt: str) -> ModelAssessment:
@@ -283,6 +326,10 @@ def build_pair_prompt(
             f"overlapping_files={pair.overlapping_files}"
         ),
         f"Git rationale: {pair.git_rationale or pair.rationale}",
+        (
+            "Static prefilter: symbols one branch changes that the other changes or calls: "
+            + (", ".join(pair.symbol_overlap[:12]) if pair.symbol_overlap else "none")
+        ),
         "",
         f"Branch {pair.branch_a} (ahead {diff_a.ahead})",
         "Recent commits:",

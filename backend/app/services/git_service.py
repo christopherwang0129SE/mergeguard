@@ -118,6 +118,28 @@ def diff_against_base(repo: Path, branch: str, base: str) -> BranchDiff:
     return BranchDiff(branch=branch, base=base, merge_base=mb, ahead=ahead, files=files)
 
 
+def show_file(repo: Path, ref: str, path: str) -> str | None:
+    """Content of ``path`` at ``ref``, or ``None`` if it does not exist there."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{ref}:{path}"],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.decode("utf-8", errors="replace")
+
+
+def rev_parse(repo: Path, ref: str) -> str:
+    return _run(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").strip()
+
+
+def commit_messages(repo: Path, base: str, branch: str, limit: int = 5) -> str:
+    """Full messages (subject + body) of the commits on ``branch`` since ``base``."""
+    mb = merge_base(repo, base, branch)
+    ref = f"{mb}..{branch}" if mb else branch
+    return _run(repo, "log", f"-n{max(1, limit)}", "--format=%s%n%n%b%n---", ref).strip()
+
+
 def recent_commit_subjects(repo: Path, branch: str, limit: int = 5) -> list[str]:
     """Short ``hash subject`` lines for ``branch``, newest first."""
     count = max(0, limit)
