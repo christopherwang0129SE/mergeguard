@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -502,3 +503,60 @@ def test_confirmed_verdict_is_authoritative_and_suspected_keeps_the_blend() -> N
         kept = sentinel.apply_verification(blended, Verification(status=status, reason="r"))
         assert (kept.score, kept.level) == (47.5, "medium")
         assert kept.score_note is None and kept.blended_score is None
+
+
+def test_project_venv_editable_installs_point_at_the_worktree(tmp_path: Path) -> None:
+    """A repo's own .venv is used, and its editable install of the main checkout
+    is redirected to the worktree under test."""
+    import sysconfig
+
+    src = tmp_path / "src"
+    (src / "lib").mkdir(parents=True)
+    (src / "lib" / "mod.py").write_text('VALUE = "main checkout"\n')
+    work = tmp_path / "work"
+    (work / "lib").mkdir(parents=True)
+    (work / "lib" / "mod.py").write_text('VALUE = "worktree"\n')
+    venv = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
+    site = next(venv.glob("lib/python3*/site-packages"))
+    # pytest from the backend env, plus an "editable install" of src/lib.
+    (site / "zz_editable.pth").write_text(
+        f"{sysconfig.get_paths()['purelib']}\n{src / 'lib'}\n"
+    )
+    (work / verifier.TEST_FILENAME).write_text(
+        "import mod\n\n\ndef test_branch_a_uses_worktree():\n"
+        "    assert mod.VALUE == 'worktree'\n"
+    )
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    python = str(venv / "bin" / "python")
+    run = verifier.run_test(work, tmp, target="a", ref="x", selection="branch", timeout=30,
+                            python=python, src_root=src)
+    assert run.exit_code == 0 and run.passed == 1, run.output
+    # Without the redirect the main checkout's code would be under test.
+    (tmp / "report-a.xml").unlink(missing_ok=True)
+    stale = verifier.run_test(work, tmp, target="a", ref="x", selection="branch", timeout=30,
+                              python=python)
+    assert stale.failed == 1, stale.output
+
+
+def test_project_python_requires_allowed_repo_with_pytest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    py = repo / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text("")
+    assert verifier.project_python(repo) == sys.executable  # not under an allowed root
+    monkeypatch.setattr(verifier.settings, "verify_allowed_roots", str(tmp_path))
+    assert verifier.project_python(repo) == sys.executable  # no pytest in the venv
+    (repo / ".venv" / "lib" / "python3.12" / "site-packages" / "pytest").mkdir(parents=True)
+    assert verifier.project_python(repo) == str(py)
+
+
+def test_focus_paths_from_evidence() -> None:
+    evidence = [
+        "Preview: changed by a (pkg/core/models.py), called by b (tests/test_ui.py)",
+        "Other: changed by both a and b (pkg/core/models.py)",
+    ]
+    assert verifier.focus_paths(evidence) == ["pkg/core/models.py", "tests/test_ui.py"]

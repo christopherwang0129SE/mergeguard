@@ -163,7 +163,9 @@ def _excerpt(repo: Path, base_branch: str, pair: PairRisk) -> str:
     paths = [c.path for c in pair.collisions if c.overlapping] or [
         c.path for c in pair.collisions
     ]
-    paths = paths[:3]
+    # No shared file: show the files the prefilter's symbol evidence names
+    # (the changed definition and its caller in the other branch).
+    paths = (paths or verifier.focus_paths(pair.symbol_evidence))[:3]
     if not paths:
         return ""
     chunks: list[str] = []

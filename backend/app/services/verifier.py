@@ -47,7 +47,7 @@ from app.services import cache, git_service, nemotron
 from app.services.nemotron import NemotronError
 from app.services.usage import UsageMeter
 
-PROMPT_VERSION = "verify-v1"
+PROMPT_VERSION = "verify-v2"
 TEST_FILENAME = "test_mergeguard_intent.py"
 MAX_OUTPUT_CHARS = 4000
 MAX_FILE_CHARS = 5000
@@ -83,8 +83,9 @@ SYSTEM_PROMPT = (
     "BOTH changes at once (exceed any new cap, limit or threshold, and depend on "
     "any new ordering). Compute every expected value by hand from THAT branch's code and "
     "show the arithmetic in a short comment. Import project modules exactly like "
-    "the existing tests do; the repository root is on sys.path. Use only the "
-    "standard library and pytest. No network, no subprocess, no file or "
+    "the existing tests do; the repository root is on sys.path and the "
+    "project's own dependencies are installed. Besides the project, use only "
+    "the standard library and pytest. No network, no subprocess, no file or "
     "environment access, no randomness, no sleeping. Define test functions at "
     "module level (no classes). Reply with only the code in a single ```python "
     "block."
@@ -154,10 +155,40 @@ def _existing_test_example(repo: Path, base: str) -> str:
     return "(no existing tests)"
 
 
-def build_test_prompt(repo: Path, base: str, branch_a: str, branch_b: str) -> str:
+_EVIDENCE_PATH = re.compile(r"\(([^()\s]+\.py)\)")
+
+
+def focus_paths(evidence: list[str] | tuple[str, ...]) -> list[str]:
+    """Files named in prefilter evidence (``f: changed by A (x.py), called by B (y.py)``)."""
+    out: list[str] = []
+    for line in evidence:
+        for path in _EVIDENCE_PATH.findall(line):
+            if path not in out:
+                out.append(path)
+    return out
+
+
+def _focused_diff(repo: Path, branch: str, base: str, paths: list[str], focus: list[str]) -> str:
+    """Diff with the files named by the prefilter first, so trimming keeps them."""
+    first = [p for p in paths if p in focus]
+    rest = [p for p in paths if p not in focus]
+    head = git_service.trimmed_diff(
+        repo, branch, base, first, max_chars=MAX_DIFF_CHARS, function_context=True
+    )
+    tail = git_service.trimmed_diff(
+        repo, branch, base, rest, max_chars=MAX_DIFF_CHARS - len(head), function_context=True
+    )
+    return (head + tail).strip()
+
+
+def build_test_prompt(
+    repo: Path, base: str, branch_a: str, branch_b: str, focus: list[str] | None = None
+) -> str:
+    focus = focus or []
     py_a = _changed_py(repo, base, branch_a)
     py_b = _changed_py(repo, base, branch_b)
-    source_files = sorted({p for p in py_a + py_b if "test" not in Path(p).name})
+    others = sorted({p for p in py_a + py_b if "test" not in Path(p).name} - set(focus))
+    source_files = [p for p in focus if p in py_a + py_b] + others
     sections: list[str] = [
         f"Base branch: {base}",
         f"Branch A: {branch_a}",
@@ -168,10 +199,8 @@ def build_test_prompt(repo: Path, base: str, branch_a: str, branch_b: str) -> st
         sections.append(f"== Branch {label} ({branch}) commit messages ==")
         sections.append(_clip(git_service.commit_messages(repo, base, branch), 1500))
         sections.append(f"== Branch {label} ({branch}) diff vs {base} (function context) ==")
-        diff = git_service.trimmed_diff(
-            repo, branch, base, paths, max_chars=MAX_DIFF_CHARS, function_context=True
-        )
-        sections.append(diff.strip() or "(no Python changes)")
+        diff = _focused_diff(repo, branch, base, paths, focus)
+        sections.append(diff or "(no Python changes)")
         sections.append("")
     for path in source_files[:3]:
         for label, ref in (("base", base), ("A", branch_a), ("B", branch_b)):
@@ -238,8 +267,21 @@ def validate_code(code: str) -> str | None:
 # Sandboxed execution
 # ---------------------------------------------------------------------------
 
-_RUNNER = '''import socket
+_RUNNER = '''import os
+import socket
 import sys
+
+# The project venv installs the repo's own packages in editable mode, pointing
+# at the main checkout. Point those sys.path entries at this worktree instead,
+# so the code under test is the branch's code.
+_src = os.environ.get("MG_SRC_ROOT")
+_work = os.environ.get("MG_WORK_ROOT")
+if _src and _work:
+    _src = _src.rstrip("/") + "/"
+    sys.path[:] = [
+        _work.rstrip("/") + "/" + p[len(_src):] if (p + "/").startswith(_src) else p
+        for p in sys.path
+    ]
 
 
 def _no_network(*_args, **_kwargs):
@@ -276,9 +318,30 @@ def _sandbox_prefix(tmp_root: Path) -> list[str]:
     return []
 
 
-def clean_env(home: Path) -> dict[str, str]:
+def project_python(repo: Path) -> str:
+    """Interpreter for the generated test.
+
+    A repo under the allowed roots may ship its own virtualenv (``.venv`` with
+    pytest installed, e.g. from ``uv sync``) so its dependencies are
+    importable; otherwise the backend's own interpreter is used.
+    """
+    venv = repo / ".venv"
+    python = venv / "bin" / "python"
+    if python.exists() and repo_allowed(repo) and any(venv.glob("lib/python3*/site-packages/pytest")):
+        return str(python)
+    return sys.executable
+
+
+def clean_env(home: Path, src_root: Path | None = None, work_root: Path | None = None) -> dict[str, str]:
     """Minimal environment for the test subprocess. No secrets pass through."""
+    extra = {}
+    if src_root is not None and work_root is not None:
+        extra = {
+            "MG_SRC_ROOT": os.path.realpath(src_root),
+            "MG_WORK_ROOT": os.path.realpath(work_root),
+        }
     return {
+        **extra,
         "PATH": "/usr/bin:/bin",
         "HOME": str(home),
         "TMPDIR": str(home),
@@ -337,8 +400,15 @@ def run_test(
     ref: str,
     selection: str,
     timeout: float,
+    python: str | None = None,
+    src_root: Path | None = None,
 ) -> VerifyRun:
-    """Run the generated test in ``workdir`` with ``-k selection``."""
+    """Run the generated test in ``workdir`` with ``-k selection``.
+
+    ``python`` is the interpreter to use (default: the backend's); with
+    ``src_root`` set, editable installs of ``src_root`` are redirected to
+    ``workdir``.
+    """
     runner = tmp_root / "mg_runner.py"
     if not runner.exists():
         runner.write_text(_RUNNER, encoding="utf-8")
@@ -347,7 +417,7 @@ def run_test(
     home.mkdir(exist_ok=True)
     cmd = [
         *_sandbox_prefix(tmp_root),
-        sys.executable,
+        python or sys.executable,
         "-I",
         str(runner),
         "-q",
@@ -366,7 +436,7 @@ def run_test(
     proc = subprocess.Popen(
         cmd,
         cwd=workdir,
-        env=clean_env(home),
+        env=clean_env(home, src_root, workdir if src_root is not None else None),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -546,20 +616,23 @@ def confirming_tests(runs: list[VerifyRun]) -> list[str]:
 def _run_all(wt: "_Worktrees", pair: PairRisk, code: str) -> list[VerifyRun]:
     """A's intent on A, B's on B, all on the merge-base and on the merge."""
     timeout = settings.verify_timeout_seconds
+    python = project_python(wt.repo)
+    src_root = wt.repo if python != sys.executable else None
+    opts = {"timeout": timeout, "python": python, "src_root": src_root}
     for name in ("a", "b", "base", "merge"):
         (wt.paths[name] / TEST_FILENAME).write_text(code, encoding="utf-8")
     runs = [
         run_test(wt.paths["a"], wt.tmp, target="a", ref=pair.branch_a,
-                 selection="branch_a", timeout=timeout),
+                 selection="branch_a", **opts),
         run_test(wt.paths["b"], wt.tmp, target="b", ref=pair.branch_b,
-                 selection="branch_b", timeout=timeout),
+                 selection="branch_b", **opts),
         run_test(wt.paths["base"], wt.tmp, target="base", ref=f"merge-base {wt.sha_base[:7]}",
-                 selection="branch", timeout=timeout),
+                 selection="branch", **opts),
     ]
     if not wt.merge_conflict:
         runs.append(
             run_test(wt.paths["merge"], wt.tmp, target="merge",
-                     ref=f"{pair.branch_a}+{pair.branch_b}", selection="branch", timeout=timeout)
+                     ref=f"{pair.branch_a}+{pair.branch_b}", selection="branch", **opts)
         )
     return runs
 
@@ -621,7 +694,9 @@ def verify_pair(
         if not (_changed_py(repo, base, pair.branch_a) or _changed_py(repo, base, pair.branch_b)):
             return finish("skipped", "no Python changes on either branch")
         key = _cache_key(repo, base, sha_a, sha_b)
-        prompt = build_test_prompt(repo, base, pair.branch_a, pair.branch_b)
+        prompt = build_test_prompt(
+            repo, base, pair.branch_a, pair.branch_b, focus=focus_paths(pair.symbol_evidence)
+        )
     except git_service.GitError as exc:
         return finish("error", f"git: {exc}"[:300])
 
