@@ -27,6 +27,9 @@ const runSummary = (run: BranchTestRun): string => {
   if (run.timed_out) {
     return 'timed out';
   }
+  if (run.problem && run.passed + run.failed + run.errors === 0) {
+    return `no results: ${run.problem}`;
+  }
   const parts = [`${run.passed} passed`];
   if (run.failed > 0) parts.push(`${run.failed} failed`);
   if (run.errors > 0) parts.push(`${run.errors} errors`);
@@ -62,13 +65,26 @@ export const BranchTestDetails = ({ branchTests }: BranchTestDetailsProps) => {
             Branch test runs ({branchTests.duration_s.toFixed(1)}s)
           </summary>
           <ul className="verification-runs">
-            {branchTests.runs.map((run) => (
-              <li key={run.target}>
-                <strong>{TARGET_LABEL[run.target]}</strong> ({run.ref}, {run.files.length} file
+            {branchTests.runs.map((run, index) => (
+              <li key={`${run.target}-${run.runner ?? 'pytest'}-${run.package ?? ''}-${index}`}>
+                <strong>{TARGET_LABEL[run.target]}</strong> ({run.ref}
+                {run.runner && run.runner !== 'pytest'
+                  ? `, ${run.runner} in ${run.package || '.'}`
+                  : ''}
+                , {run.files.length} file
                 {run.files.length === 1 ? '' : 's'}): {runSummary(run)}
               </li>
             ))}
           </ul>
+          {(branchTests.setup?.length ?? 0) > 0 && (
+            <div className="verification-sandbox" data-testid="branch-test-setup">
+              JS setup
+              {(branchTests.install_s ?? 0) > 0 || (branchTests.build_s ?? 0) > 0
+                ? ` (install ${(branchTests.install_s ?? 0).toFixed(1)}s, builds ${(branchTests.build_s ?? 0).toFixed(1)}s)`
+                : ''}
+              : {branchTests.setup?.join('; ')}
+            </div>
+          )}
           {branchTests.sandbox && (
             <div className="verification-sandbox">Sandbox: {branchTests.sandbox}</div>
           )}

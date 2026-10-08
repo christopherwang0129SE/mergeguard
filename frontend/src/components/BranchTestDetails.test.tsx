@@ -70,6 +70,28 @@ describe('BranchTestDetails', () => {
     expect(screen.getByText('Merge A+B').parentElement).toHaveTextContent('2 files): 2 passed, 1 failed')
   })
 
+  it('shows the JS runner, package and install/build time', () => {
+    const js = branchTests({
+      files_a: ['packages/bridge/src/bridge.test.ts'],
+      files_b: ['packages/bridge/src/bridge.test.ts'],
+      runs: [
+        { target: 'merge', ref: 'a+b', files: ['packages/bridge/src/bridge.test.ts'], exit_code: 1, passed: 565, failed: 1, errors: 0, timed_out: false, duration_s: 18.4, runner: 'vitest', package: 'packages/bridge', problem: '' },
+        { target: 'merge', ref: 'a+b', files: ['packages/web/src/x.test.tsx'], exit_code: null, passed: 0, failed: 0, errors: 0, timed_out: false, duration_s: 0, runner: 'vitest', package: 'packages/web', problem: 'JS setup failed: no lockfile' },
+      ],
+      setup: ['npm install (npm-0abef5c7, scripts disabled): 29.6s', 'packages/core: built in 41.7s'],
+      install_s: 29.6,
+      build_s: 41.7,
+    })
+    render(<BranchTestDetails branchTests={js} />)
+    fireEvent.click(screen.getByText('Branch test runs (3.2s)'))
+    const items = screen.getAllByText('Merge A+B').map((el) => el.parentElement)
+    expect(items[0]).toHaveTextContent('vitest in packages/bridge, 1 file): 565 passed, 1 failed')
+    expect(items[1]).toHaveTextContent('no results: JS setup failed: no lockfile')
+    expect(screen.getByTestId('branch-test-setup')).toHaveTextContent(
+      'JS setup (install 29.6s, builds 41.7s): npm install (npm-0abef5c7, scripts disabled): 29.6s; packages/core: built in 41.7s'
+    )
+  })
+
   it('shows a neutral badge when the branch tests pass on the merge', () => {
     render(<BranchTestDetails branchTests={branchTests({ status: 'passed', confirming: [] })} />)
     expect(screen.getByText('Branch tests pass on merge')).not.toHaveClass('badge-confirmed')

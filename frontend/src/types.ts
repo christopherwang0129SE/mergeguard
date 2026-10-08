@@ -114,6 +114,12 @@ export interface BranchTestRun {
   errors: number;
   timed_out: boolean;
   duration_s: number;
+  /** "pytest", or "vitest" / "jest" for a JS/TS package. */
+  runner?: string;
+  /** JS: package directory the runner ran in. */
+  package?: string;
+  /** Why the run produced no results (setup failure, startup error). */
+  problem?: string;
 }
 
 export interface BranchTestFailure {
@@ -135,6 +141,12 @@ export interface BranchTests {
   merge_conflict: boolean;
   sandbox?: string | null;
   duration_s: number;
+  /** JS: dependency install / workspace build notes. */
+  setup?: string[];
+  /** JS dependency install time spent in this check (0 when reused from cache). */
+  install_s?: number;
+  /** JS workspace build time spent in this check. */
+  build_s?: number;
 }
 
 export interface UsageSummary {
