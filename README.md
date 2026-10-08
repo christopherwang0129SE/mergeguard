@@ -105,7 +105,43 @@ is `"model_error"` or `"unparsable"`. Pairs past the cap use `"pair_cap"`.
    `estimated_cost_usd`, prefilter/top-K counts, and `elapsed_s`. The dashboard
    summary bar shows calls, tokens, and estimated $.
 
-### Verify-by-test (semantic conflicts, with evidence)
+### Branch tests on merge (deterministic, no LLM)
+
+Each branch usually ships tests for its own change, and a semantic merge
+conflict very often shows up as one of those tests failing once the other
+branch lands. For every prefilter-candidate pair with a clean textual merge,
+Sentinel collects the test files each branch **added or modified** since the
+merge-base, runs A's on A, B's on B and both sets on the merge of A+B, in the
+same sandbox as verify-by-test below (throwaway worktrees, the repo's own
+`.venv`, stripped environment, no network, timeout). This runs before and
+independently of the model triage: no LLM call, $0, and a low model score
+cannot suppress it.
+
+`pairs[].branch_tests.status` is:
+
+- `confirmed`: a branch's own test passes on its branch and fails on A+B,
+  twice (a test that passes on the re-run is dropped as flaky), and does not
+  already fail on the merge-base. Evidence: `confirming[]` with the test id,
+  whose test it is and a short error excerpt. Authoritative like an
+  intent-test confirmation: level `high`, score floored at
+  `VERIFY_CONFIRMED_FLOOR`, `score_note` `"raised: confirmed by branch test"`
+  (or `"... by branch test and intent test"` when both layers confirm). The UI
+  labels it **Confirmed by branch test (existing tests, no LLM)**, separate
+  from **Confirmed by intent test (Nemotron)**.
+- `passed`: ran, no such test. `skipped`: no test files changed, or a textual
+  merge conflict. `unsupported`: only JS/TS test files changed (pytest only;
+  running vitest would need `node_modules` and a build in every worktree).
+  `error`: could not run (for example a timeout).
+
+Limits: at most `BRANCH_TESTS_MAX_PAIRS` pairs (default 6, highest prefilter
+signal first), `BRANCH_TESTS_MAX_FILES` test files per branch (20),
+`BRANCH_TESTS_TIMEOUT_SECONDS` per pytest run (120) and
+`BRANCH_TESTS_TOTAL_SECONDS` for the whole stage (600; later pairs are
+skipped). It runs only where verify-by-test may run (local repos under
+`VERIFY_ALLOWED_ROOTS`, `"verify": true`). `BRANCH_TESTS_ENABLED=false` turns
+it off.
+
+### Verify-by-test: intent tests (semantic conflicts, with evidence)
 
 For pairs scored **high risk** (model level `high`, or published/model score
 ≥ `VERIFY_MIN_SCORE`, default 70), Sentinel asks Nemotron to write one small
@@ -177,7 +213,10 @@ python3 demo/replay.py --case real-case-1 --prove   # demo/replay_case_1.py stil
 
 More real cases, and the ones MergeGuard did not confirm, are in the
 [Semantic Conflict Hall of Fame](docs/HALL_OF_FAME.md)
-(`python3 demo/replay.py --list`).
+(`python3 demo/replay.py --list`). With the branch-test stage, the current
+pipeline confirms daimon, KISS and elastic 3/3 each (daimon by both layers,
+KISS and elastic by the branch test only); TypeScript qwen-code is not
+supported by either layer.
 
 What `--prove` shows (`pytest packages/adapters/discord/tests -k "branding or privacy_panel or purge"`):
 
@@ -238,6 +277,26 @@ command above):
 | harmless fixture, verify forced on every pair | 2 | 12 | 0 | 12 | 0 | 303.9 | 180,940 | 0.1078 |
 
 No errors and no rationale claims contradicted by the static checks in any run.
+
+After adding the branch-test stage and the corrected prompt line (`risk-v8`),
+re-measured on 2026-10-08, 3 runs per case. "Branch" and "intent" count the
+pairs each layer confirmed; "confirmed" is either layer:
+
+| case | runs | pairs | confirmed | by branch test | by intent test | branch-test status | median time (s) | tokens | $ |
+|---|---|---|---|---|---|---|---|---|---|
+| real case (daimon #14 x #17) | 3 | 3 | 3 | 3 | 3 | confirmed 3 | 85.9 | 79,040 | 0.0405 |
+| KISS #311 x #315 | 3 | 3 | 3 | 3 | 0 (suspected 3) | confirmed 3 | 110.4 | 241,807 | 0.1009 |
+| elastic #381 x #383 | 3 | 3 | 3 | 3 | 0 (not run: score < 70) | confirmed 3 | 17.4 | 8,484 | 0.0033 |
+| qwen-code #8947 x #8933 (TypeScript) | 3 | 3 | 0 | 0 | 0 (skipped) | unsupported 3 | 9.1 | 12,305 | 0.0056 |
+| checkout demo, conflicting pair | 3 | 3 | 3 | 3 | 3 | confirmed 3 | 30.1 | 47,135 | 0.0285 |
+| checkout demo, docs pairs | 3 | 6 | 0 | 0 | 0 | not run 6 (not candidates) | (same runs) | | |
+| harmless fixture | 3 | 18 | 0 | 0 | 0 | passed 9, not run 9 | 10.6 | 11,388 | 0.0050 |
+| harmless fixture, both layers forced on every pair | 3 | 18 | 0 | 0 | 0 (suspected 18) | passed 15, skipped 3 | 293.3 | 275,569 | 0.1645 |
+
+Harmless pairs: 42 pair-runs, **0 false confirmations** (branch test 0,
+intent test 0). Total spend for this re-measure: $0.3484. The branch-test
+stage adds no LLM cost; it took 12.9-33.6 s per run on the three Python
+replays.
 
 What makes it stable:
 
@@ -367,6 +426,7 @@ backend/            FastAPI service
       prefilter.py    static symbol/call prefilter before any LLM call
       cache.py        on-disk Nemotron result cache
       verifier.py     verify-by-test (generated pytest in throwaway worktrees)
+      branch_tests.py branch tests on merge (each branch's own tests on A+B, no LLM)
   tests/
 frontend/           dashboard (to be scaffolded)
 docs/               customer discovery + notes
