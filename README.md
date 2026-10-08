@@ -172,8 +172,12 @@ Replay it locally (clones at pinned SHAs into `demo/real-case-1/`, gitignored;
 needs `uv` and network once for the project venv; no Postgres needed):
 
 ```bash
-python3 demo/replay_case_1.py --prove
+python3 demo/replay.py --case real-case-1 --prove   # demo/replay_case_1.py still works
 ```
+
+More real cases, and the ones MergeGuard did not confirm, are in the
+[Semantic Conflict Hall of Fame](docs/HALL_OF_FAME.md)
+(`python3 demo/replay.py --list`).
 
 What `--prove` shows (`pytest packages/adapters/discord/tests -k "branding or privacy_panel or purge"`):
 
