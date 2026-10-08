@@ -454,3 +454,23 @@ def test_reasoning_overflow_retries_without_thinking_even_after_a_test_ran(
     assert result.attempts == 3
     assert seen[0] is None and seen[1] is None
     assert seen[2] == verifier.NO_THINKING
+
+
+def test_stale_worktrees_from_a_killed_run_are_cleaned_up(vrepo: Path, tmp_path: Path) -> None:
+    import os
+    import tempfile
+
+    stale_root = Path(tempfile.mkdtemp(prefix="mg-verify-"))
+    _git(vrepo, "worktree", "add", "--detach", "--quiet", str(stale_root / "a"), "feat/scale")
+    fresh_root = Path(tempfile.mkdtemp(prefix="mg-verify-"))
+    _git(vrepo, "worktree", "add", "--detach", "--quiet", str(fresh_root / "a"), "feat/total")
+    old = 2 * 60 * 60
+    os.utime(stale_root, (os.path.getatime(stale_root) - old, os.path.getmtime(stale_root) - old))
+    assert len(_worktrees(vrepo)) == 3
+
+    assert verifier.cleanup_stale_worktrees(vrepo) == 1
+    remaining = "\n".join(_worktrees(vrepo))
+    assert str(stale_root.name) not in remaining
+    assert str(fresh_root.name) in remaining  # a concurrent run is left alone
+    assert not stale_root.exists()
+    _git(vrepo, "worktree", "remove", "--force", str(fresh_root / "a"))

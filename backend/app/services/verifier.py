@@ -406,6 +406,49 @@ def _run_ok(run: VerifyRun) -> bool:
     return (not run.timed_out) and run.exit_code == 0 and run.passed > 0 and run.failed == 0 and run.errors == 0
 
 
+STALE_WORKTREE_SECONDS = 30 * 60
+
+
+def cleanup_stale_worktrees(repo: Path, max_age_s: float = STALE_WORKTREE_SECONDS) -> int:
+    """Remove ``mg-verify-*`` worktrees left behind by a killed run.
+
+    Only touches worktrees this module created (temp dirs named
+    ``mg-verify-*``) that are older than ``max_age_s``, so concurrent runs are
+    never disturbed. Returns how many worktrees were removed.
+    """
+    try:
+        listing = git_service._run(repo, "worktree", "list", "--porcelain")
+    except git_service.GitError:
+        return 0
+    removed = 0
+    parents: set[Path] = set()
+    now = time.time()
+    for line in listing.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        path = Path(line[len("worktree "):])
+        if not path.parent.name.startswith("mg-verify-"):
+            continue
+        try:
+            age = now - path.parent.stat().st_mtime
+        except OSError:
+            age = max_age_s + 1  # directory is gone: always stale
+        if age <= max_age_s:
+            continue
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "remove", "--force", str(path)],
+            capture_output=True,
+        )
+        parents.add(path.parent)
+        removed += 1
+    for parent in parents:
+        # Our temp root holds only the worktrees plus runner/report files.
+        if parent.is_dir() and not any(p.is_dir() and (p / ".git").exists() for p in parent.iterdir()):
+            shutil.rmtree(parent, ignore_errors=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True)
+    return removed
+
+
 class _Worktrees:
     """Throwaway worktrees for A, B and the merge of A+B. Always cleaned up."""
 
@@ -420,6 +463,7 @@ class _Worktrees:
         self.merge_output = ""
 
     def __enter__(self) -> "_Worktrees":
+        cleanup_stale_worktrees(self.repo)
         try:
             for name, sha in (
                 ("a", self.sha_a),
