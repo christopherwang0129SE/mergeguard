@@ -64,6 +64,7 @@ export interface PairRisk {
   prompt_tokens?: number;
   completion_tokens?: number;
   verification?: Verification | null;
+  branch_tests?: BranchTests | null;
   score_note?: string | null;
   blended_score?: number | null;
 }
@@ -101,6 +102,41 @@ export interface Verification {
   completion_tokens: number;
 }
 
+export type BranchTestStatus = 'confirmed' | 'passed' | 'skipped' | 'unsupported' | 'error';
+
+export interface BranchTestRun {
+  target: 'a' | 'b' | 'base' | 'merge' | 'merge-rerun';
+  ref: string;
+  files: string[];
+  exit_code: number | null;
+  passed: number;
+  failed: number;
+  errors: number;
+  timed_out: boolean;
+  duration_s: number;
+}
+
+export interface BranchTestFailure {
+  test_id: string;
+  branch: string;
+  file: string;
+  excerpt: string;
+}
+
+/** Deterministic check (no LLM): each branch's own changed tests run on A+B. */
+export interface BranchTests {
+  status: BranchTestStatus;
+  reason: string;
+  files_a: string[];
+  files_b: string[];
+  unsupported_files: string[];
+  runs: BranchTestRun[];
+  confirming: BranchTestFailure[];
+  merge_conflict: boolean;
+  sandbox?: string | null;
+  duration_s: number;
+}
+
 export interface UsageSummary {
   model: string;
   llm_calls: number;
@@ -118,6 +154,8 @@ export interface UsageSummary {
   top_k: number;
   verify_pairs?: number;
   verify_confirmed?: number;
+  branch_test_pairs?: number;
+  branch_test_confirmed?: number;
   elapsed_s: number;
 }
 

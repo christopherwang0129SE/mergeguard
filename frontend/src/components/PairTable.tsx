@@ -5,9 +5,11 @@ import {
   sortPairsByScoreDesc,
   isFloorRule,
   isHiddenConflict,
+  isConfirmedByTest,
 } from '../utils/risk';
 import type { PairRisk } from '../types';
 import { VerificationDetails } from './VerificationDetails';
+import { BranchTestDetails } from './BranchTestDetails';
 
 interface PairTableProps {
   pairs: PairRisk[];
@@ -64,7 +66,7 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
             {sortedPairs.map((pair) => {
               const floor = isFloorRule(pair);
               const hidden = isHiddenConflict(pair);
-              const confirmed = pair.verification?.status === 'confirmed';
+              const confirmed = isConfirmedByTest(pair);
               const [modelLine, floorLine] = floor ? floorRationale(pair) : ['', ''];
               const rowClass = confirmed
                 ? 'row-confirmed'
@@ -146,6 +148,9 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
                         Not supported by the static checks:{' '}
                         {pair.unsupported_claims.join(' ')}
                       </div>
+                    )}
+                    {pair.branch_tests && (
+                      <BranchTestDetails branchTests={pair.branch_tests} />
                     )}
                     {pair.verification && (
                       <VerificationDetails verification={pair.verification} />

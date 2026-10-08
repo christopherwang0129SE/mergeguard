@@ -203,6 +203,17 @@ export const sortPairsByScoreDesc = (pairs: PairRisk[]): PairRisk[] => {
  * Verify-by-test confirmed the conflict (generated intent tests pass on each
  * branch and fail on the merge). The backend then publishes level high.
  */
-export const isConfirmedByTest = (pair: {
+export const isConfirmedByIntentTest = (pair: {
   verification?: { status: string } | null;
 }): boolean => pair.verification?.status === 'confirmed';
+
+/** The branches' own tests pass on each branch and fail on A+B (no LLM). */
+export const isConfirmedByBranchTest = (pair: {
+  branch_tests?: { status: string } | null;
+}): boolean => pair.branch_tests?.status === 'confirmed';
+
+/** Confirmed by either layer: branch tests (deterministic) or intent test (Nemotron). */
+export const isConfirmedByTest = (pair: {
+  verification?: { status: string } | null;
+  branch_tests?: { status: string } | null;
+}): boolean => isConfirmedByIntentTest(pair) || isConfirmedByBranchTest(pair);

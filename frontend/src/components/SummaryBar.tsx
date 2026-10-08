@@ -6,6 +6,7 @@ import {
   isHiddenConflict,
   effectivePairLevel,
   isConfirmedByTest,
+  isConfirmedByBranchTest,
 } from '../utils/risk';
 import type { PairRisk, RiskLevel, UsageSummary } from '../types';
 import { usageLine } from '../utils/usage';
@@ -48,6 +49,7 @@ export const SummaryBar = ({ pairs, usage }: SummaryBarProps) => {
   const worst = worstLevel(pairs);
   const hidden = pairs.filter((pair) => isHiddenConflict(pair)).length;
   const confirmed = pairs.filter((pair) => isConfirmedByTest(pair)).length;
+  const byBranchTest = pairs.filter((pair) => isConfirmedByBranchTest(pair)).length;
   // Pairs whose effective level is medium or high: shown medium/high pairs
   // plus hidden conflicts.
   const risky = pairs.filter(
@@ -69,7 +71,8 @@ export const SummaryBar = ({ pairs, usage }: SummaryBarProps) => {
     // Only hidden conflicts, nothing published medium/high.
     line1 = `${hidden} hidden conflict${hidden === 1 ? '' : 's'} among ${total} pairs`;
   } else {
-    const confirmedPart = confirmed > 0 ? ` · ${confirmed} confirmed by test` : '';
+    const branchPart = byBranchTest > 0 ? ` (${byBranchTest} by branch test)` : '';
+    const confirmedPart = confirmed > 0 ? ` · ${confirmed} confirmed by test${branchPart}` : '';
     const hiddenPart = hidden > 0 ? ` · ${hidden} hidden` : '';
     const suffix = `${confirmedPart}${hiddenPart}`;
     line1 = `${atWorst} of ${total} branch pairs at ${levelToText(worst).toLowerCase()} risk${suffix}`;

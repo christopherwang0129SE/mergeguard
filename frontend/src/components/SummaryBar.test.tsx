@@ -327,4 +327,25 @@ describe('SummaryBar confirmed by test', () => {
     render(<SummaryBar pairs={[suspected]} />)
     expect(screen.getByText('1 of 1 branch pairs at high risk')).toBeInTheDocument()
   })
+
+  it('counts a pair confirmed only by branch tests and says so', () => {
+    const branchOnly = pair('feat/tuple', 'feat/report', 90, 'high', {
+      score_note: 'raised: confirmed by branch test',
+      branch_tests: {
+        status: 'confirmed',
+        reason: 'r',
+        files_a: ['tests/test_store.py'],
+        files_b: ['tests/test_report.py'],
+        unsupported_files: [],
+        runs: [],
+        confirming: [],
+        merge_conflict: false,
+        duration_s: 1,
+      },
+    })
+    render(<SummaryBar pairs={[branchOnly, docs('feat/tuple')]} />)
+    expect(
+      screen.getByText('1 of 2 branch pairs at high risk · 1 confirmed by test (1 by branch test)')
+    ).toBeInTheDocument()
+  })
 })

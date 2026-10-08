@@ -46,9 +46,9 @@ const pair = (extra: Partial<PairRisk> = {}): PairRisk => ({
 })
 
 describe('VerificationDetails', () => {
-  it('shows a Confirmed by test badge for a confirmed pair', () => {
+  it('shows a Confirmed by intent test badge for a confirmed pair', () => {
     render(<VerificationDetails verification={verification()} />)
-    expect(screen.getByText('Confirmed by test')).toHaveClass('badge-confirmed')
+    expect(screen.getByText('Confirmed by intent test (Nemotron)')).toHaveClass('badge-confirmed')
   })
 
   it('keeps the generated test collapsed until expanded', () => {
@@ -66,12 +66,12 @@ describe('VerificationDetails', () => {
     const { rerender } = render(
       <VerificationDetails verification={verification({ status: 'suspected', reason: 'generated test also passes on the merge' })} />
     )
-    expect(screen.queryByText('Confirmed by test')).toBeNull()
-    expect(screen.getByText('Suspected: test inconclusive')).toBeInTheDocument()
+    expect(screen.queryByText('Confirmed by intent test (Nemotron)')).toBeNull()
+    expect(screen.getByText('Suspected: intent test inconclusive')).toBeInTheDocument()
     rerender(
       <VerificationDetails verification={verification({ status: 'skipped', test_code: null, runs: [] })} />
     )
-    expect(screen.getByText('Test skipped')).toBeInTheDocument()
+    expect(screen.getByText('Intent test skipped')).toBeInTheDocument()
     expect(screen.queryByText(/Generated test/)).toBeNull()
   })
 
@@ -83,7 +83,7 @@ describe('VerificationDetails', () => {
       />
     )
     expect(screen.getAllByTestId('verification')).toHaveLength(1)
-    expect(screen.getByText('Confirmed by test')).toBeInTheDocument()
+    expect(screen.getByText('Confirmed by intent test (Nemotron)')).toBeInTheDocument()
   })
 
   it('shows the raised score note in the level cell of a confirmed pair', () => {
@@ -134,7 +134,7 @@ describe('VerificationDetails', () => {
       verify_pairs: 1, verify_confirmed: 1, elapsed_s: 38.8,
     }
     expect(usageLine(usage)).toBe(
-      '2 LLM calls · 8,715 tokens · $0.0054 est. · 2 filtered before LLM · 1/1 confirmed by test'
+      '2 LLM calls · 8,715 tokens · $0.0054 est. · 2 filtered before LLM · 1/1 confirmed by intent test'
     )
   })
 })

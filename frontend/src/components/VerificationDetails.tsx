@@ -5,10 +5,10 @@ interface VerificationDetailsProps {
 }
 
 const BADGE: Record<Verification['status'], { label: string; className: string }> = {
-  confirmed: { label: 'Confirmed by test', className: 'badge badge-confirmed' },
-  suspected: { label: 'Suspected: test inconclusive', className: 'badge badge-suspected' },
-  error: { label: 'Test error', className: 'badge badge-suspected' },
-  skipped: { label: 'Test skipped', className: 'badge badge-suspected' },
+  confirmed: { label: 'Confirmed by intent test (Nemotron)', className: 'badge badge-confirmed' },
+  suspected: { label: 'Suspected: intent test inconclusive', className: 'badge badge-suspected' },
+  error: { label: 'Intent test error', className: 'badge badge-suspected' },
+  skipped: { label: 'Intent test skipped', className: 'badge badge-suspected' },
 };
 
 const TARGET_LABEL: Record<VerifyRun['target'], string> = {
@@ -29,7 +29,7 @@ const runSummary = (run: VerifyRun): string => {
 };
 
 /**
- * Verify-by-test result for one pair: a status badge plus an expandable
+ * Nemotron intent-test (verify-by-test) result for one pair: a status badge plus an expandable
  * section with the generated pytest test and the per-checkout outcomes.
  */
 export const VerificationDetails = ({ verification }: VerificationDetailsProps) => {

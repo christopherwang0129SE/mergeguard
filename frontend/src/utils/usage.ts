@@ -17,7 +17,12 @@ export const usageLine = (usage: UsageSummary): string => {
     parts.push(`${usage.pairs_prefiltered} filtered before LLM`);
   }
   if (usage.verify_pairs && usage.verify_pairs > 0) {
-    parts.push(`${usage.verify_confirmed ?? 0}/${usage.verify_pairs} confirmed by test`);
+    parts.push(`${usage.verify_confirmed ?? 0}/${usage.verify_pairs} confirmed by intent test`);
+  }
+  if (usage.branch_test_pairs && usage.branch_test_pairs > 0) {
+    parts.push(
+      `${usage.branch_test_confirmed ?? 0}/${usage.branch_test_pairs} confirmed by branch test`
+    );
   }
   return parts.join(' · ');
 };
