@@ -247,6 +247,10 @@ def test_complete_uses_token_factory_chat_completions(monkeypatch: pytest.Monkey
     assert "JSON" in created["messages"][0]["content"]
     assert created["messages"][1] == {"role": "user", "content": "pair context"}
     assert created["max_tokens"] == 2048
+    # Deterministic risk scoring: no sampling, fixed seed.
+    assert created["temperature"] == 0
+    assert created["top_p"] == 1
+    assert created["seed"] == 42
 
 
 def test_empty_model_response_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:

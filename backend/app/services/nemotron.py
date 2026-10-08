@@ -93,7 +93,9 @@ def complete(user_prompt: str) -> str:
     try:
         completion = client.chat.completions.create(
             model=settings.nebius_model,
-            temperature=0.1,
+            temperature=0,
+            top_p=1,
+            seed=42,
             max_tokens=2048,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
