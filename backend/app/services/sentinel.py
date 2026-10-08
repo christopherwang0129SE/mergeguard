@@ -166,9 +166,15 @@ def _excerpt(repo: Path, base_branch: str, pair: PairRisk) -> str:
     # No shared file: show the files the prefilter's symbol evidence names
     # (the changed definition and its caller in the other branch).
     paths = (paths or verifier.focus_paths(pair.symbol_evidence))[:3]
-    if not paths:
-        return ""
     chunks: list[str] = []
+    try:
+        snippets = prefilter.evidence_snippets(repo, base_branch, pair.symbol_evidence)
+    except git_service.GitError:
+        snippets = ""
+    if snippets:
+        chunks.append(f"--- prefilter evidence: changed definition and call site ---\n{snippets}")
+    if not paths:
+        return "\n".join(chunks)
     for branch in (pair.branch_a, pair.branch_b):
         try:
             text = git_service.trimmed_diff(

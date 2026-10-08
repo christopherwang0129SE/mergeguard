@@ -324,3 +324,58 @@ def test_api_returns_usage(repo: Path) -> None:
     assert usage["model"] == "nvidia/nemotron-3-super-120b-a12b"
     assert usage["top_k"] == 5
     assert usage["input_usd_per_1m"] == 0.30
+
+
+def test_signature_change_and_call_mismatch() -> None:
+    import ast
+
+    from app.services.prefilter import call_mismatch, signature_change
+
+    old = ast.parse("class P:\n    a: int\n    b: int = 0\n").body[0]
+    new = ast.parse("class P:\n    a: int\n    b: int = 0\n    c: int\n    d: int = 1\n").body[0]
+    assert signature_change(old, new) == "breaking signature change: new required c"
+    ok_call = ast.parse("P(a=1, c=2)").body[0].value
+    bad_call = ast.parse("P(a=1)").body[0].value
+    splat = ast.parse("P(**kw)").body[0].value
+    assert call_mismatch(ok_call, old, new) is None
+    assert call_mismatch(bad_call, old, new) == "call site does not pass new required c"
+    assert call_mismatch(splat, old, new) is None  # unknown: not claimed
+    f_old = ast.parse("def f(x, ctx=None):\n    pass\n").body[0]
+    f_new = ast.parse("def f(x, *, flag=False):\n    pass\n").body[0]
+    assert signature_change(f_old, f_new) == "breaking signature change: removed ctx"
+    assert call_mismatch(ast.parse("f(x=1, ctx=2)").body[0].value, f_old, f_new) == (
+        "call site still passes removed ctx"
+    )
+    assert call_mismatch(ast.parse("f(x=1)").body[0].value, f_old, f_new) is None
+    assert signature_change(f_old, ast.parse("def f(x, ctx=None, y=1):\n    pass\n").body[0]) == (
+        "compatible signature change: new optional y"
+    )
+
+
+def test_evidence_snippets_show_definition_diff_and_call_site(tmp_path: Path) -> None:
+    from app.services.prefilter import evidence_snippets
+
+    r = tmp_path / "ev"
+    r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    _git(r, "config", "user.email", "t@example.com")
+    _git(r, "config", "user.name", "Test")
+    (r / "models.py").write_text("class Preview:\n    a: int\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-qm", "base")
+    _git(r, "checkout", "-q", "-b", "fields")
+    (r / "models.py").write_text("class Preview:\n    a: int\n    b: int\n")
+    _git(r, "commit", "-qam", "required b")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "checkout", "-q", "-b", "caller")
+    (r / "use.py").write_text("from models import Preview\n\nP = Preview(a=1)\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-qm", "caller")
+    text = evidence_snippets(
+        r, "main", ["Preview: changed by fields (models.py), called by caller (use.py)"]
+    )
+    assert text.startswith(
+        "[breaking signature change: new required b; call site does not pass new required b]"
+    )
+    assert "+    b: int" in text
+    assert "    3 | P = Preview(a=1)" in text

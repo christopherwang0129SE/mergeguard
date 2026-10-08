@@ -446,3 +446,192 @@ def symbol_overlap(
     names = tuple(sorted(hits))
     evidence = tuple(sorted(e for name in names for e in hits[name]))
     return names, evidence
+
+
+# ---------------------------------------------------------------------------
+# Evidence snippets for the model: the changed definition and the call site
+# ---------------------------------------------------------------------------
+
+_EVIDENCE_CALL = re.compile(
+    r"^(?P<name>[\w.]+): changed by (?P<changer>\S+) \((?P<def_path>[^()]+)\), "
+    r"called by (?P<caller>\S+) \((?P<call_path>[^()]+)\)$"
+)
+MAX_SNIPPET_LINES = 30
+
+
+def _find_def(tree: ast.AST, name: str) -> ast.AST | None:
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == name:
+                return node
+    return None
+
+
+def _params(node: ast.AST | None) -> dict[str, bool]:
+    """What callers depend on: ``name -> required`` for a function's parameters
+    or a class's fields (dataclass / pydantic style) and ``__init__``."""
+    if node is None:
+        return {}
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        a = node.args
+        positional = [*a.posonlyargs, *a.args]
+        n_required = len(positional) - len(a.defaults)
+        out = {arg.arg: i < n_required for i, arg in enumerate(positional)}
+        for arg, default in zip(a.kwonlyargs, a.kw_defaults):
+            out[arg.arg] = default is None
+        out.pop("self", None)
+        out.pop("cls", None)
+        return out
+    if isinstance(node, ast.ClassDef):
+        out = {}
+        for stmt in node.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                if not stmt.target.id.startswith("_") and stmt.target.id != "model_config":
+                    out[stmt.target.id] = stmt.value is None
+        init = next(
+            (n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None
+        )
+        out.update(_params(init))
+        return out
+    return {}
+
+
+def signature_change(old: ast.AST | None, new: ast.AST | None) -> str | None:
+    """Describe a caller-visible change between two versions of a def, if any."""
+    if old is None or new is None:
+        return None
+    before, after = _params(old), _params(new)
+    added_required = [k for k, req in after.items() if req and not before.get(k, False)]
+    removed = [k for k in before if k not in after]
+    added_optional = [k for k, req in after.items() if not req and k not in before]
+    if added_required or removed:
+        parts = []
+        if added_required:
+            parts.append("new required " + ", ".join(added_required))
+        if removed:
+            parts.append("removed " + ", ".join(removed))
+        return "breaking signature change: " + "; ".join(parts)
+    if added_optional:
+        return "compatible signature change: new optional " + ", ".join(added_optional)
+    return None
+
+
+def _parse(source: str | None) -> ast.AST | None:
+    if not source:
+        return None
+    try:
+        return ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _lines(source: str, node: ast.AST) -> list[str]:
+    start = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
+    end = getattr(node, "end_lineno", None) or node.lineno
+    return source.splitlines()[start - 1 : end]
+
+
+def _first_call(tree: ast.AST, name: str) -> ast.Call | None:
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and (
+            (isinstance(n.func, ast.Name) and n.func.id == name)
+            or (isinstance(n.func, ast.Attribute) and n.func.attr == name)
+        )
+    ]
+    return min(calls, key=lambda n: n.lineno) if calls else None
+
+
+def call_mismatch(call: ast.Call, old: ast.AST | None, new: ast.AST | None) -> str | None:
+    """Does this call site break against the new signature? Only for calls
+    whose arguments are all keywords (no ``*args`` / ``**kwargs``)."""
+    if old is None or new is None or call.args:
+        return None
+    if any(k.arg is None for k in call.keywords):
+        return None
+    before, after = _params(old), _params(new)
+    passed = {k.arg for k in call.keywords}
+    missing = [k for k, req in after.items() if req and not before.get(k, False) and k not in passed]
+    stale = [k for k in before if k not in after and k in passed]
+    parts = []
+    if missing:
+        parts.append("call site does not pass new required " + ", ".join(missing))
+    if stale:
+        parts.append("call site still passes removed " + ", ".join(stale))
+    return "; ".join(parts) or None
+
+
+def _call_site(source: str, tree: ast.AST, name: str, around: int = 3) -> str | None:
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and (
+            (isinstance(n.func, ast.Name) and n.func.id == name)
+            or (isinstance(n.func, ast.Attribute) and n.func.attr == name)
+        )
+    ]
+    if not calls:
+        return None
+    call = min(calls, key=lambda n: n.lineno)
+    lines = source.splitlines()
+    start = max(call.lineno - around, 1)
+    end = min((getattr(call, "end_lineno", None) or call.lineno) + around, len(lines))
+    end = min(end, start + MAX_SNIPPET_LINES - 1)
+    return "\n".join(f"{i:5d} | {lines[i - 1]}" for i in range(start, end + 1))
+
+
+def evidence_snippets(
+    repo: Path, base_branch: str, evidence: list[str] | tuple[str, ...], max_items: int = 2
+) -> str:
+    """Code behind the top "changed by X, called by Y" evidence lines.
+
+    For each item: the definition as it was on the merge-base vs. on the
+    branch that changed it (unified diff), and the call site on the other
+    branch. A call site that no longer matches the new signature comes first,
+    then breaking signature changes (a new required parameter / field, or a
+    removed one), then compatible ones, then body-only changes.
+    """
+    import difflib
+
+    items: list[tuple[int, str]] = []
+    for line in evidence:
+        m = _EVIDENCE_CALL.match(line)
+        if not m:
+            continue
+        name, changer, def_path = m["name"], m["changer"], m["def_path"]
+        caller, call_path = m["caller"], m["call_path"]
+        if not (def_path.endswith(".py") and call_path.endswith(".py")):
+            continue
+        try:
+            mb = git_service.merge_base(repo, base_branch, changer) or base_branch
+            old_src = git_service.show_file(repo, mb, def_path)
+            new_src = git_service.show_file(repo, changer, def_path)
+            call_src = git_service.show_file(repo, caller, call_path)
+        except git_service.GitError:
+            continue
+        old_tree, new_tree, call_tree = _parse(old_src), _parse(new_src), _parse(call_src)
+        new_node = _find_def(new_tree, name) if new_tree else None
+        if new_node is None or call_tree is None or new_src is None or call_src is None:
+            continue
+        old_node = _find_def(old_tree, name) if old_tree else None
+        change = signature_change(old_node, new_node)
+        call = _first_call(call_tree, name)
+        mismatch = call_mismatch(call, old_node, new_node) if call is not None else None
+        if mismatch:
+            change = f"{change}; {mismatch}"
+        rank = (
+            0 if mismatch else 1 if change and change.startswith("breaking") else 2 if change else 3
+        )
+        old_lines = _lines(old_src, old_node) if old_node is not None and old_src else []
+        new_lines = _lines(new_src, new_node)
+        diff = list(difflib.unified_diff(
+            old_lines, new_lines, f"{def_path} (merge-base)", f"{def_path} ({changer})",
+            n=3, lineterm="",
+        ))[: MAX_SNIPPET_LINES + 2]
+        site = _call_site(call_src, call_tree, name)
+        if not diff or not site:
+            continue
+        head = f"[{change or 'body changed'}] {line}"
+        text = "\n".join([head, *diff, f"call site on {caller} ({call_path}):", site])
+        items.append((rank, text))
+    items.sort(key=lambda item: item[0])
+    return "\n\n".join(text for _, text in items[:max_items])
