@@ -326,14 +326,16 @@ def check_pair(repo: Path, base: str, branch_a: str, branch_b: str) -> BranchTes
     js_side: _JsSide | None = None
 
     def finish(status: str, reason: str, **extra) -> BranchTests:
+        sandbox = verifier.sandbox_kind()
         if js_side is not None:
+            sandbox = f"{sandbox}; JS test runs: localhost allowed, no other network"
             extra.setdefault("setup", js_side.setup)
             extra.setdefault("install_s", round(js_side.install_s, 1))
             extra.setdefault("build_s", round(js_side.build_s, 1))
         return BranchTests(
             status=status,  # type: ignore[arg-type]
             reason=reason,
-            sandbox=verifier.sandbox_kind(),
+            sandbox=sandbox,
             duration_s=round(time.monotonic() - started, 2),
             **extra,
         )

@@ -146,6 +146,7 @@ def test_js_new_caller_against_changed_return_value_is_confirmed(jsrepo: Path) -
     assert [r.target for r in res.runs] == ["a", "b", "merge", "merge-rerun"]
     assert {r.runner for r in res.runs} == {"vitest"} and res.runs[0].package == "."
     assert res.install_s == 1.5 and any("npm install" in s for s in res.setup)
+    assert res.sandbox.endswith("JS test runs: localhost allowed, no other network")
     assert len(_git(jsrepo, "worktree", "list").splitlines()) == 1  # worktrees removed
 
 
