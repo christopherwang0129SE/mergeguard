@@ -24,6 +24,7 @@ from app.schemas import BranchDiff, ChangedFile, FileCollision, PairRisk, RiskLe
 # Prompt budget. Excerpts are dropped before the structured summary is cut.
 MAX_PROMPT_CHARS = 9000
 MAX_EXCERPT_CHARS = 4000
+MIN_EXCERPT_CHARS = 300
 MAX_FILES = 12
 MAX_COLLISIONS = 8
 MAX_RATIONALE_CHARS = 500
@@ -361,16 +362,19 @@ def build_pair_prompt(
     ]
     body = "\n".join(sections)
 
+    header = "\n\nDiff excerpts (trimmed):\n"
+    trim_marker = "\n...(trimmed)"
     excerpt_text = excerpt.strip()
-    if len(excerpt_text) > MAX_EXCERPT_CHARS:
-        excerpt_text = excerpt_text[:MAX_EXCERPT_CHARS].rstrip() + "\n...(trimmed)"
-    if excerpt_text:
-        prompt = body + "\n\nDiff excerpts (trimmed):\n" + excerpt_text
-    else:
-        prompt = body + "\n\nDiff excerpts (trimmed):\n(none)"
-
+    # Fit the excerpt into what the body leaves of the prompt budget instead
+    # of dropping it whole; it starts with the most specific evidence.
+    budget = min(MAX_EXCERPT_CHARS, MAX_PROMPT_CHARS - len(body) - len(header) - len(trim_marker))
+    if len(excerpt_text) > budget:
+        excerpt_text = (
+            excerpt_text[:budget].rstrip() + trim_marker if budget >= MIN_EXCERPT_CHARS else ""
+        )
+        if not excerpt_text:
+            excerpt_text = "(omitted; context budget)"
+    prompt = body + header + (excerpt_text or "(none)")
     if len(prompt) > MAX_PROMPT_CHARS:
-        prompt = body + "\n\nDiff excerpts (trimmed):\n(omitted; context budget)"
-    if len(prompt) > MAX_PROMPT_CHARS:
-        prompt = prompt[:MAX_PROMPT_CHARS].rstrip() + "\n...(trimmed)"
+        prompt = prompt[: MAX_PROMPT_CHARS - len(trim_marker)].rstrip() + trim_marker
     return prompt

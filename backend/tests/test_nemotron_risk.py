@@ -371,3 +371,20 @@ def test_health_reports_model_and_provider() -> None:
     assert body["provider"] == "Nebius Token Factory"
     assert body["base_url"] == "https://api.tokenfactory.nebius.com/v1/"
     assert "nebius_api_key" not in body
+
+
+def test_excerpt_is_trimmed_to_fit_not_dropped_when_the_body_is_large() -> None:
+    from app.schemas import BranchDiff, ChangedFile, PairRisk
+    from app.services.nemotron import build_pair_prompt
+
+    files = [ChangedFile(path=f"pkg/module_{i:03d}_with_a_long_name.py", added_lines=1,
+                         removed_lines=0, hunks=[(1, 1)]) for i in range(60)]
+    diff = BranchDiff(branch="a", base="main", merge_base="x", ahead=1, files=files)
+    pair = PairRisk(branch_a="a", branch_b="b", score=0.0, level="none", rationale="r" * 3000, shared_files=0, overlapping_files=0, collisions=[],
+                    symbol_overlap=["P"], symbol_evidence=["P: changed by a (m.py), called by b (t.py)"])
+    excerpt = "[breaking signature change: new required c] evidence first\n" + "x" * 8000
+    prompt = build_pair_prompt(base_branch="main", pair=pair, diff_a=diff, diff_b=diff,
+                               commits_a=["c"] * 5, commits_b=["c"] * 5, excerpt=excerpt)
+    assert len(prompt) <= MAX_PROMPT_CHARS
+    assert "[breaking signature change: new required c] evidence first" in prompt
+    assert "(omitted; context budget)" not in prompt
