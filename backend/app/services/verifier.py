@@ -43,11 +43,11 @@ from pathlib import Path
 
 from app.config import settings
 from app.schemas import PairRisk, Verification, VerifyRun
-from app.services import cache, git_service, nemotron
+from app.services import cache, git_service, nemotron, prefilter
 from app.services.nemotron import NemotronError
 from app.services.usage import UsageMeter
 
-PROMPT_VERSION = "verify-v2"
+PROMPT_VERSION = "verify-v3"
 TEST_FILENAME = "test_mergeguard_intent.py"
 MAX_OUTPUT_CHARS = 4000
 MAX_FILE_CHARS = 5000
@@ -182,7 +182,12 @@ def _focused_diff(repo: Path, branch: str, base: str, paths: list[str], focus: l
 
 
 def build_test_prompt(
-    repo: Path, base: str, branch_a: str, branch_b: str, focus: list[str] | None = None
+    repo: Path,
+    base: str,
+    branch_a: str,
+    branch_b: str,
+    focus: list[str] | None = None,
+    evidence: list[str] | None = None,
 ) -> str:
     focus = focus or []
     py_a = _changed_py(repo, base, branch_a)
@@ -195,6 +200,14 @@ def build_test_prompt(
         f"Branch B: {branch_b}",
         "",
     ]
+    snippets = prefilter.evidence_snippets(repo, base, evidence or []) if evidence else ""
+    if snippets:
+        sections += [
+            "== Static analysis: a definition one branch changed and the other branch's "
+            "call site ==",
+            snippets,
+            "",
+        ]
     for label, branch, paths in (("A", branch_a, py_a), ("B", branch_b, py_b)):
         sections.append(f"== Branch {label} ({branch}) commit messages ==")
         sections.append(_clip(git_service.commit_messages(repo, base, branch), 1500))
@@ -698,7 +711,8 @@ def verify_pair(
             return finish("skipped", "no Python changes on either branch")
         key = _cache_key(repo, base, sha_a, sha_b)
         prompt = build_test_prompt(
-            repo, base, pair.branch_a, pair.branch_b, focus=focus_paths(pair.symbol_evidence)
+            repo, base, pair.branch_a, pair.branch_b,
+            focus=focus_paths(pair.symbol_evidence), evidence=pair.symbol_evidence,
         )
     except git_service.GitError as exc:
         return finish("error", f"git: {exc}"[:300])
