@@ -121,6 +121,8 @@ class PairRisk(BaseModel):
     fallback_reason: FallbackReason | None = None
     # Static prefilter signal (cheap, before any LLM call).
     symbol_overlap: list[str] = Field(default_factory=list)
+    # One line per overlap: who changed the symbol, who changes/calls it, where.
+    symbol_evidence: list[str] = Field(default_factory=list)
     prefilter_candidate: bool = True
     # Model call accounting for this pair (0 tokens when served from cache).
     model_cached: bool = False

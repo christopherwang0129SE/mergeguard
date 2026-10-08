@@ -55,6 +55,7 @@ export interface PairRisk {
   model_rationale?: string | null;
   fallback_reason?: FallbackReason;
   symbol_overlap?: string[];
+  symbol_evidence?: string[];
   prefilter_candidate?: boolean;
   model_cached?: boolean;
   prompt_tokens?: number;

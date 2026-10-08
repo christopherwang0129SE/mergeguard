@@ -90,22 +90,63 @@ def _by_pair(res):
 
 def test_python_symbols_def_and_call() -> None:
     changed = file_symbols("lib.py", LIB.replace("x + 1", "x + 100"), [(2, 2)])
-    assert changed.defs == {"f"}
-    caller_src = APP.replace("return g(3)", "return g(f(3))")
-    caller = file_symbols("app.py", caller_src, [(5, 5)])
-    assert {"f", "g"} <= caller.calls
-    assert "run" in caller.defs
-    assert symbol_overlap(changed, caller) == ("f",)
+    assert changed.def_names == {"f"}
+    caller_src = APP.replace("from lib import g", "from lib import f, g").replace(
+        "return g(3)", "return g(f(3))"
+    )
+    caller = file_symbols("app.py", caller_src, [(1, 1), (5, 5)])
+    assert {"f", "g"} <= caller.call_names
+    assert {c.module for c in caller.calls if c.name in ("f", "g")} == {"lib"}
+    assert "run" in caller.def_names
+    names, evidence = symbol_overlap(changed, caller, "feat-def", "feat-call")
+    assert names == ("f",)
+    assert evidence == ("f: changed by feat-def (lib.py), called by feat-call (app.py)",)
+
+
+def test_calls_to_a_function_neither_branch_changed_do_not_count() -> None:
+    # Both branches call g(); neither changes g. No overlap.
+    a = file_symbols("app.py", "from lib import g\n\n\ndef run():\n    return g(1)\n", [(5, 5)])
+    b = file_symbols("cli.py", "from lib import g\n\n\ndef main2():\n    return g(2)\n", [(5, 5)])
+    assert "g" in a.call_names and "g" in b.call_names
+    assert symbol_overlap(a, b) == ((), ())
+
+
+def test_calls_resolve_through_imports_not_bare_names() -> None:
+    changed = file_symbols("checkout.py", "def total(x):\n    return x + 1\n", [(2, 2)])
+    # Module-qualified call into checkout -> real dependency.
+    via_module = file_symbols("t.py", "import checkout\n\ncheckout.total(3)\n", [(3, 3)])
+    assert symbol_overlap(changed, via_module)[0] == ("total",)
+    # Aliased from-import -> real dependency.
+    via_alias = file_symbols("t.py", "from checkout import total as t\n\nt(3)\n", [(3, 3)])
+    assert symbol_overlap(changed, via_alias)[0] == ("total",)
+    # Same name from a different module -> not a dependency.
+    other_module = file_symbols("t.py", "import invoice\n\ninvoice.total(3)\n", [(3, 3)])
+    assert symbol_overlap(changed, other_module) == ((), ())
+    # A method call on some object -> only matches a changed method.
+    method_call = file_symbols("t.py", "def f(cart):\n    return cart.total()\n", [(2, 2)])
+    assert symbol_overlap(changed, method_call) == ((), ())
+    # A bare name that is neither imported nor defined here (builtin/local).
+    bare = file_symbols("t.py", "def f():\n    return total(1)\n", [(2, 2)])
+    assert symbol_overlap(changed, bare) == ((), ())
+
+
+def test_changed_method_matches_method_calls() -> None:
+    src = "class Cart:\n    def total(self):\n        return 1\n"
+    changed = file_symbols("cart.py", src, [(3, 3)])
+    assert {(d.name, d.kind) for d in changed.defs} == {("total", "method")}
+    caller = file_symbols("t.py", "def f(cart):\n    return cart.total()\n", [(2, 2)])
+    assert symbol_overlap(changed, caller)[0] == ("total",)
 
 
 def test_regex_heuristic_for_other_languages() -> None:
     js = "export function price(a) {\n  return a * 2;\n}\nconst total = (x) => price(x) + 1;\n"
     syms = regex_symbols(js, [(2, 2)])
-    assert "price" in syms.defs
+    assert "price" in syms.def_names
     caller = regex_symbols(js, [(4, 4)])
-    assert "price" in caller.calls
-    assert "total" in caller.defs
-    assert "if" not in regex_symbols("if (x) { go(1) }\n", [(1, 1)]).calls
+    assert "price" in caller.call_names
+    assert "total" in caller.def_names
+    assert "if" not in regex_symbols("if (x) { go(1) }\n", [(1, 1)]).call_names
+    assert symbol_overlap(syms, caller)[0] == ("price",)
 
 
 def test_prefilter_drops_harmless_pairs_before_the_llm(
@@ -120,6 +161,9 @@ def test_prefilter_drops_harmless_pairs_before_the_llm(
     defcall = pairs[frozenset(("feat-def", "feat-call"))]
     assert defcall.shared_files == 0
     assert defcall.symbol_overlap == ["f"]
+    assert defcall.symbol_evidence == [
+        "f: changed by feat-def (lib.py), called by feat-call (app.py)"
+    ]
     assert defcall.prefilter_candidate is True
     assert defcall.score_source == "model"
     assert "Static prefilter" in calls[0] and ": f" in calls[0]

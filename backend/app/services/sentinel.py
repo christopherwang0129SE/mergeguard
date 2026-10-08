@@ -312,10 +312,14 @@ def _prefilter_signals(
     }
     signals: dict[tuple[str, str], prefilter.PairSignal] = {}
     for pair in pairs:
+        names, evidence = prefilter.symbol_overlap(
+            symbols[pair.branch_a], symbols[pair.branch_b], pair.branch_a, pair.branch_b
+        )
         signals[(pair.branch_a, pair.branch_b)] = prefilter.PairSignal(
             shared_files=pair.shared_files,
             overlapping_files=pair.overlapping_files,
-            symbols=prefilter.symbol_overlap(symbols[pair.branch_a], symbols[pair.branch_b]),
+            symbols=names,
+            evidence=evidence,
         )
     return signals
 
@@ -434,6 +438,7 @@ def analyze(
         p.model_copy(
             update={
                 "symbol_overlap": list(signals[(p.branch_a, p.branch_b)].symbols),
+                "symbol_evidence": list(signals[(p.branch_a, p.branch_b)].evidence),
                 "prefilter_candidate": signals[(p.branch_a, p.branch_b)].is_candidate,
             }
         )

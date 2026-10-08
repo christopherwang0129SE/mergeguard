@@ -342,6 +342,7 @@ def build_pair_prompt(
             "Static prefilter: symbols one branch changes that the other changes or calls: "
             + (", ".join(pair.symbol_overlap[:12]) if pair.symbol_overlap else "none")
         ),
+        *[f"- {line}" for line in pair.symbol_evidence[:8]],
         "",
         f"Branch {pair.branch_a} (ahead {diff_a.ahead})",
         "Recent commits:",

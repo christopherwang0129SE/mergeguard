@@ -81,12 +81,19 @@ is `"model_error"` or `"unparsable"`. Pairs past the cap use `"pair_cap"`.
 ### Cost-aware pipeline
 
 1. **Static prefilter (no LLM).** For every branch, Sentinel extracts the
-   functions/classes it changed and the names it calls from changed code
-   (Python via `ast`; other languages via a `def`/`function`/`func`/`fn` regex
-   heuristic). A pair is a model candidate only if the branches share a file
-   or one branch changes a symbol the other changes or calls (PR A edits
-   `def f`, PR B calls `f`). Other pairs get `fallback_reason: "prefiltered"`
-   and never reach the model. Each pair carries `symbol_overlap`.
+   functions/classes/constants it changed and the calls made from changed
+   code. Python uses `ast` and resolves calls through the file's imports:
+   `checkout.total()` only matches a `total` defined in `checkout.py`, a bare
+   `total()` only matches one imported from or defined in its own module, and
+   `obj.total()` only matches a changed *method*. Other languages use a
+   `def`/`function`/`func`/`fn` regex heuristic matched by name. An overlap
+   needs one branch to have CHANGED the definition (both changed it, or one
+   changed it and the other calls it); calls both branches make to a function
+   neither changed never count. A pair is a model candidate only if the
+   branches share a file or have such an overlap; other pairs get
+   `fallback_reason: "prefiltered"` and never reach the model. Each pair
+   carries `symbol_overlap` and `symbol_evidence` (who changed it, who calls
+   it, in which file).
 2. **Top-K.** Only the `NEBIUS_MAX_PAIRS` (default 5) strongest candidates
    are sent to Nemotron; the rest get `"pair_cap"`.
 3. **Disk cache.** Model results are cached under
