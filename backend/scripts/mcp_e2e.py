@@ -10,6 +10,8 @@ backend/.workspace/mcp-e2e/<timestamp>/; a trimmed view is printed.
 
     NEBIUS_API_KEY=... python scripts/mcp_e2e.py   # run with the MCP venv python
     python scripts/mcp_e2e.py --cached             # every call may reuse the caches
+    python scripts/mcp_e2e.py --env-file ~/x.env   # key via MERGEGUARD_ENV_FILE, as
+                                                   # in the client configs
 
 The key is passed to the server process from this process's environment
 only; it is never printed or written.
@@ -48,7 +50,12 @@ CALLS = [
 async def main() -> int:
     out_dir = BACKEND / ".workspace" / "mcp-e2e" / time.strftime("%Y%m%d-%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
-    env = {k: os.environ[k] for k in ("NEBIUS_API_KEY", "VERIFY_ALLOWED_ROOTS") if os.environ.get(k)}
+    argv = sys.argv[1:]
+    if "--env-file" in argv:  # exactly what the Cursor / Claude Code configs pass
+        env = {"MERGEGUARD_ENV_FILE": argv[argv.index("--env-file") + 1]}
+    else:
+        env = {k: os.environ[k] for k in ("NEBIUS_API_KEY", "VERIFY_ALLOWED_ROOTS")
+               if os.environ.get(k)}
     params = StdioServerParameters(command=sys.executable,
                                    args=[str(BACKEND / "mergeguard_mcp" / "server.py")],
                                    env=env, cwd="/")
@@ -61,10 +68,16 @@ async def main() -> int:
             if cached:
                 args = {k: v for k, v in args.items() if k != "use_cache"}
             started = time.monotonic()
-            res = await client.call_tool(name, args, read_timeout_seconds=900)
+            progress: list[str] = []
+
+            async def on_progress(value, total, message, _seen=progress):
+                _seen.append(message or "")
+
+            res = await client.call_tool(name, args, read_timeout_seconds=900,
+                                         progress_callback=on_progress)
             elapsed = time.monotonic() - started
             record = {"label": label, "tool": name, "arguments": args, "elapsed_s": round(elapsed, 1),
-                      "is_error": res.is_error,
+                      "is_error": res.is_error, "progress": progress,
                       "structured": res.structured_content,
                       "text": [getattr(c, "text", None) for c in res.content]}
             (out_dir / f"{i:02d}-{label}-{name}.json").write_text(json.dumps(record, indent=2))
@@ -72,8 +85,10 @@ async def main() -> int:
             spent += float(cost.get("estimated_cost_usd") or 0.0)
             head = (res.content[0].text[:160] if res.is_error else
                     (res.structured_content or {}).get("summary") or "")
+            note = (res.structured_content or {}).get("note")
             print(f"[{i}] {label} {name} {elapsed:.1f}s error={res.is_error} "
-                  f"${cost.get('estimated_cost_usd', 0)} | {head}", flush=True)
+                  f"${cost.get('estimated_cost_usd', 0)} progress={len(progress)}"
+                  f"{' NOTE: ' + note if note else ''} | {head}", flush=True)
     print(f"total estimated spend: ${spent:.4f}\nresults: {out_dir}")
     return 0
 

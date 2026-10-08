@@ -309,11 +309,21 @@ Cursor (`.cursor/mcp.json` in your project, or `~/.cursor/mcp.json`):
 Claude Code:
 
 ```bash
-claude mcp add mergeguard \
+claude mcp add mergeguard --scope local \
   -e MERGEGUARD_ENV_FILE=~/.config/mergeguard/nebius.env \
   -e VERIFY_ALLOWED_ROOTS=/ABS/PATH/to/your/repos \
   -- /ABS/PATH/mergeguard/.venv-mcp/bin/python /ABS/PATH/mergeguard/backend/mergeguard_mcp/server.py
 ```
+
+`.cursor/mcp.json` holds absolute local paths, so it is gitignored. Every
+tool sends an MCP progress notification when it starts and then every 5 s
+while it runs (a fresh analysis takes 20-80 s), for clients that show progress
+or reset their request timeout on it.
+
+Checked in real clients on 2026-10-08: Claude Code 2.1.282 (`claude mcp get
+mergeguard`: Connected, local scope) and Cursor CLI 2026.08.11
+(`cursor-agent mcp list-tools mergeguard`: the three tools with their
+arguments), both launching the server with exactly the config above.
 
 End-to-end check over real stdio with the official MCP client
 (`backend/scripts/mcp_e2e.py`, full JSON in `backend/.workspace/mcp-e2e/`).

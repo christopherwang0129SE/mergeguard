@@ -33,3 +33,6 @@ backend/.workspace/
 
 # --- iCloud junk, just in case ---
 *.icloud
+
+# --- Local MCP client config (absolute local paths) ---
+.cursor/mcp.json

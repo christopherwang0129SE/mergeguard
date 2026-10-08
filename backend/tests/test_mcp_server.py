@@ -68,3 +68,44 @@ def test_env_file_supplies_only_nebius_settings(tmp_path, monkeypatch: pytest.Mo
     monkeypatch.setenv("NEBIUS_API_KEY", "explicit")
     server._load_env_file()
     assert os.environ["NEBIUS_API_KEY"] == "explicit"
+
+
+def test_long_calls_send_progress_heartbeats(mcp_server, repo, monkeypatch: pytest.MonkeyPatch) -> None:
+    import time as _time
+
+    from mergeguard_mcp import server
+
+    srv, engine = mcp_server
+    monkeypatch.setattr(server, "HEARTBEAT_S", 0.05)
+    slow = FakeEngine()
+
+    def slow_engine(*args, **kwargs):
+        _time.sleep(0.3)
+        return slow(*args, **kwargs)
+
+    monkeypatch.setattr("app.services.sentinel.analyze", slow_engine)
+    seen: list[tuple[float, str | None]] = []
+
+    async def on_progress(progress, total, message):
+        seen.append((progress, message))
+
+    async def go():
+        async with Client(srv) as client:
+            listed = await client.list_tools()
+            props = {t.name: set(t.input_schema["properties"]) for t in listed.tools}
+            res = await client.call_tool("check_merge_risk",
+                                         {"repo_path": str(repo), "branch": "feat/tax"},
+                                         progress_callback=on_progress)
+            bad = await client.call_tool("check_merge_risk",
+                                         {"repo_path": str(repo), "branch": "nope"},
+                                         progress_callback=on_progress)
+            return props, res, bad
+
+    props, res, bad = anyio.run(go)
+    assert all("ctx" not in p for p in props.values())
+    assert props["check_merge_risk"] == {"repo_path", "branch", "base", "verify", "use_cache"}
+    assert not res.is_error and res.structured_content["pairs"][0]["verdict"] == "confirmed"
+    assert seen[0] == (0, "check_merge_risk: started")
+    assert len(seen) >= 3 and all("still analysing" in m for _, m in seen[1:3])
+    assert [p for p, _ in seen[:3]] == [0, 1, 2]
+    assert bad.is_error and "is not a local branch" in bad.content[0].text
