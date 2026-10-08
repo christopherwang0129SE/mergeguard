@@ -71,13 +71,17 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
                 >
                   <td className="branch-name">{pair.branch_a}</td>
                   <td className="branch-name">{pair.branch_b}</td>
-                  <td>
-                    <span
-                      className="level-dot"
-                      style={{ backgroundColor: levelToColor(pair.level) }}
-                      aria-hidden="true"
-                    ></span>
-                    <span className="risk-number">Risk {Math.round(pair.score)} / 100</span>{' '}
+                  <td className="level-cell">
+                    <div className="level-top">
+                      <span
+                        className="level-dot"
+                        style={{ backgroundColor: levelToColor(pair.level) }}
+                        aria-hidden="true"
+                      ></span>
+                      <span className="risk-number">
+                        Risk {Math.round(pair.score)} / 100
+                      </span>
+                    </div>
                     <span className="level-word" style={{ color: levelToTextColor(pair.level) }}>
                       {levelToText(pair.level)}
                     </span>
@@ -96,7 +100,7 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
                       </span>
                     )}
                   </td>
-                  <td>
+                  <td className="rationale-cell">
                     {floor ? (
                       <div className="rationale-lines">
                         <span className="badge badge-floor">

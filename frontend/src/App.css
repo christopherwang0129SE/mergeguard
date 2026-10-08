@@ -285,6 +285,19 @@ main.container > * + * {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: #111827;
+  white-space: nowrap;
+}
+
+/* Level column: "Risk N / 100" stays on one line, the level word wraps to
+   the second line. */
+.level-cell {
+  min-width: 150px;
+}
+
+.level-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .level-word {
@@ -296,8 +309,12 @@ main.container > * + * {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  margin-right: 8px;
-  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+/* Rationale text is capped so long model rationales don't stretch the row. */
+.rationale-cell {
+  max-width: 60ch;
 }
 
 /* Highlighted row: Nemotron flagged a hidden conflict. */
