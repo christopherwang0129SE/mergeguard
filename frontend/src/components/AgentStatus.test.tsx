@@ -19,7 +19,7 @@ describe('AgentStatus', () => {
     expect(screen.getByText(/git only/i)).toBeInTheDocument();
   });
 
-  it('shows Sentinel online with git+Nemotron mode when Nebius is ready', () => {
+  it('shows Sentinel online with git+Nemotron mode and the model id when Nebius is ready', () => {
     render(
       <AgentStatus
         health={health({ nebius_ready: true, nebius_enabled: true, nebius_model: 'nemotron' })}
@@ -35,11 +35,10 @@ describe('AgentStatus', () => {
     expect(screen.getByText(/offline/i)).toBeInTheDocument();
   });
 
-  it('always shows Planner and Merger as planned', () => {
+  it('shows Planner and Merger as soon chips', () => {
     render(<AgentStatus health={health()} />);
     expect(screen.getByText(/planner/i)).toBeInTheDocument();
-    // Both Planner and Merger show "Planned"
-    expect(screen.getAllByText(/planned/i)).toHaveLength(2);
     expect(screen.getByText(/merger/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/soon/i)).toHaveLength(2);
   });
 });
