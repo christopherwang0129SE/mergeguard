@@ -1,19 +1,14 @@
+import { sentinelMode, sentinelStatus } from '../utils/agent';
+import type { HealthResponse } from '../types';
+
 interface AgentStatusProps {
-  health: any; // from /api/health
+  health: HealthResponse | null;
 }
 
 export const AgentStatus = ({ health }: AgentStatusProps) => {
-  if (!health) {
-    return (
-      <div className="agent-status">
-        <h2>Agent Status</h2>
-        <p>Loading health...</p>
-      </div>
-    );
-  }
-
-  const sentinelStatus = health.nebius_ready && health.nebius_enabled ? 'Live' : 'Offline';
-  const sentinelColor = health.nebius_ready && health.nebius_enabled ? '#10b981' : '#ef4444';
+  const status = sentinelStatus(health);
+  const mode = sentinelMode(health);
+  const online = status === 'online';
 
   return (
     <div className="agent-status">
@@ -21,21 +16,23 @@ export const AgentStatus = ({ health }: AgentStatusProps) => {
       <div className="status-item">
         <strong>Sentinel:</strong>
         <span
-          style={{
-            display: 'inline-block',
-            width: '12px',
-            height: '12px',
-            backgroundColor: sentinelColor,
-            marginLeft: '8px',
-          }}
+          className="status-dot"
+          style={{ backgroundColor: online ? '#10b981' : '#ef4444' }}
+          aria-hidden="true"
         ></span>
-        {sentinelStatus} (Nebius: {health.nebius_ready ? 'ready' : 'not ready'}, Model: {health.nebius_model ?? 'none'})
+        <span className="status-text">
+          {online ? 'Online' : 'Offline'}
+          {online ? ` · ${mode}` : ''}
+          {online && health?.nebius_model ? ` · ${health.nebius_model}` : ''}
+        </span>
       </div>
       <div className="status-item">
-        <strong>Planner:</strong> Planned
+        <strong>Planner:</strong>
+        <span className="status-text">Planned</span>
       </div>
       <div className="status-item">
-        <strong>Merger:</strong> Planned
+        <strong>Merger:</strong>
+        <span className="status-text">Planned</span>
       </div>
     </div>
   );
