@@ -3,3 +3,4 @@ checkout-demo/
 
 # Real-world replay (demo/replay_case_1.py): public repo clone + venv, not committed.
 real-case-1/
+harmless-demo/
