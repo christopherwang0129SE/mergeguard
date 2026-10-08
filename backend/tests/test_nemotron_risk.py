@@ -253,6 +253,50 @@ def test_complete_uses_token_factory_chat_completions(monkeypatch: pytest.Monkey
     assert created["seed"] == 42
 
 
+def test_risk_prompt_asks_for_combined_behaviour() -> None:
+    """The system prompt must ask for the joint post-merge behaviour, not
+    just textual overlap."""
+    from app.services.nemotron import SYSTEM_PROMPT
+
+    lowered = SYSTEM_PROMPT.lower()
+    assert "combined" in lowered
+    assert "after both branches land" in lowered
+    assert "semantic" in lowered
+
+
+def test_risk_prompt_contains_both_branches_and_function_context(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user prompt must carry diff hunks of BOTH branches plus the
+    unchanged function context around them (git diff -W)."""
+    prompts: list[str] = []
+
+    def fake_complete(prompt: str) -> str:
+        prompts.append(prompt)
+        return json.dumps(
+            {"risk_score": 10, "risk_level": "low", "rationale": "Independent."}
+        )
+
+    monkeypatch.setattr(settings, "nebius_api_key", "test-key")
+    monkeypatch.setattr("app.services.nemotron.complete", fake_complete)
+
+    _res, by_pair = _pairs(repo)
+    # feat-a vs feat-c: shared file, no overlap -> the model sees both hunks.
+    ac = by_pair[frozenset(("feat-a", "feat-c"))]
+    assert ac.score_source == "model"
+    assert prompts
+    prompt = next(p for p in prompts if "feat-a" in p and "feat-c" in p)
+    # Both branches' real hunks are present.
+    assert "a edits top" in prompt
+    assert "c edits bottom" in prompt
+    # Function context: the diff excerpt includes unchanged lines around the
+    # changed lines (git diff -W / -U1 context), not just the changed lines.
+    assert "line 1" in prompt
+    assert "line 20" in prompt
+    assert "line 3 CHANGED BY A" in prompt
+    assert "line 19 CHANGED BY C" in prompt
+
+
 def test_empty_model_response_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Completion:
         choices: list = []

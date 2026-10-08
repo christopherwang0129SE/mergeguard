@@ -158,7 +158,12 @@ def _excerpt(repo: Path, base_branch: str, pair: PairRisk) -> str:
     for branch in (pair.branch_a, pair.branch_b):
         try:
             text = git_service.trimmed_diff(
-                repo, branch, base_branch, paths, max_chars=1100
+                repo,
+                branch,
+                base_branch,
+                paths,
+                max_chars=2000,
+                function_context=True,
             )
         except git_service.GitError:
             text = ""

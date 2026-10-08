@@ -141,13 +141,21 @@ def trimmed_diff(
     base: str,
     paths: list[str],
     max_chars: int,
+    function_context: bool = False,
 ) -> str:
-    """Unified diff excerpt for ``paths`` on ``branch`` vs the merge-base with ``base``."""
+    """Unified diff excerpt for ``paths`` on ``branch`` vs the merge-base with ``base``.
+
+    With ``function_context=True`` the diff is built with ``git diff -W``
+    (``--function-context``): each hunk is wrapped in the whole enclosing
+    function, so the model sees the unchanged context around the changed
+    lines. Without it, a plain ``-U1`` unified diff is used.
+    """
     if not paths or max_chars <= 0:
         return ""
     mb = merge_base(repo, base, branch)
     ref = f"{mb}..{branch}" if mb else f"{base}..{branch}"
-    text = _run(repo, "diff", "--no-color", "-U1", ref, "--", *paths)
+    context_args = ["-W"] if function_context else ["-U1"]
+    text = _run(repo, "diff", "--no-color", *context_args, ref, "--", *paths)
     if len(text) <= max_chars:
         return text
     return text[:max_chars].rstrip() + "\n...(trimmed)\n"

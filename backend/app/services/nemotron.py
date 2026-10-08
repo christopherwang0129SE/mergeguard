@@ -28,8 +28,8 @@ from app.config import settings
 from app.schemas import BranchDiff, ChangedFile, FileCollision, PairRisk, RiskLevel
 
 # Prompt budget. Excerpts are dropped before the structured summary is cut.
-MAX_PROMPT_CHARS = 7000
-MAX_EXCERPT_CHARS = 2400
+MAX_PROMPT_CHARS = 9000
+MAX_EXCERPT_CHARS = 4000
 MAX_FILES = 12
 MAX_COLLISIONS = 8
 MAX_RATIONALE_CHARS = 500
@@ -38,11 +38,12 @@ _LEVELS: set[str] = {"none", "low", "medium", "high"}
 
 SYSTEM_PROMPT = (
     "You assess whether two in-flight git branches are likely to conflict or "
-    "break each other when both land on the same base branch. Use the git "
-    "heuristic as context, not as your answer: it only sees textual hunk "
-    "overlap. Also consider semantic clashes visible in the file list and "
-    "diff excerpt (incompatible edits to the same logic, signature changes "
-    "versus call sites). "
+    "break each other when both land on the same base branch. Judge the "
+    "COMBINED behaviour after both branches land: look for semantic conflicts "
+    "the diff heuristic cannot see — changed assumptions, operation order, "
+    "invariants, incompatible edits to the same logic, signature changes "
+    "versus call sites. The git heuristic is context only: it sees textual "
+    "hunk overlap and adjacency, not meaning. "
     "Reply with one JSON object and no other text, using this shape: "
     '{"risk_score": <number 0-100>, "risk_level": "none"|"low"|"medium"|"high", '
     '"rationale": "<one or two sentences>"}. '
