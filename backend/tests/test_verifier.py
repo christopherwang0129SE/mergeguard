@@ -591,3 +591,32 @@ def test_static_break_makes_a_pair_eligible_for_verify() -> None:
     low = _pair(score_source="git", model_score=None, model_level=None, score=5.0, level="low")
     assert not verifier.is_high_risk(low)
     assert verifier.is_high_risk(low.model_copy(update={"static_breaks": ["f: call site ..."]}))
+
+
+def test_break_hints_point_the_test_at_the_broken_call_site(tmp_path: Path) -> None:
+    r = tmp_path / "bh"
+    r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    _git(r, "config", "user.email", "t@example.com")
+    _git(r, "config", "user.name", "Test")
+    (r / "models.py").write_text("class Preview:\n    a: int\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-qm", "base")
+    _git(r, "checkout", "-q", "-b", "fields")
+    (r / "models.py").write_text("class Preview:\n    a: int\n    b: int\n")
+    _git(r, "commit", "-qam", "required b")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "checkout", "-q", "-b", "caller")
+    (r / "use.py").write_text("from models import Preview\n\n\ndef make():\n    return Preview(a=1)\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-qm", "caller")
+    evidence = ["Preview: changed by fields (models.py), called by caller (use.py)"]
+    hints = verifier.break_hints(r, "main", "fields", "caller", evidence)
+    assert hints == [
+        "- Preview: call site use.py:5 on caller does not pass new required b. Branch B "
+        "(caller) calls Preview at use.py:5 inside make(). A test_branch_b_* that runs that "
+        "code path (import it from use.py) passes on branch B, fails on the merge-base (where "
+        "that code does not exist yet) and fails on the merge."
+    ]
+    prompt = verifier.build_test_prompt(r, "main", "fields", "caller", evidence=evidence)
+    assert "== Exact static check: call sites that no longer match ==" in prompt

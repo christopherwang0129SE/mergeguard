@@ -133,6 +133,8 @@ def main() -> int:
                             f" (model {pair.model_score})")
             print(f"[{case.name} run {i}] {elapsed:.1f}s ${usage.estimated_cost_usd:.4f} | "
                   + "; ".join(line), flush=True)
+        if not target.pairs:  # no expected-confirmed pair: the runs belong to the harmless row
+            harmless.tokens, harmless.usd = target.tokens, target.usd
         rows += [r for r in (target, harmless) if r.pairs]
         if stopped:
             break

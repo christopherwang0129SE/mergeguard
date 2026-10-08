@@ -579,6 +579,26 @@ def call_mismatch(call: ast.Call, old: ast.AST | None, new: ast.AST | None) -> s
     return f"call site {detail}" if detail else None
 
 
+def _enclosing(tree: ast.AST, call: ast.Call) -> str | None:
+    """Innermost function that contains ``call`` (``Class.method`` for methods)."""
+    best: tuple[int, str] | None = None
+
+    def visit(body: list[ast.stmt], prefix: str) -> None:
+        nonlocal best
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                visit(node.body, f"{prefix}{node.name}.")
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                end = getattr(node, "end_lineno", None) or node.lineno
+                if node.lineno <= call.lineno <= end:
+                    if best is None or node.lineno >= best[0]:
+                        best = (node.lineno, prefix + node.name)
+                    visit(node.body, f"{prefix}{node.name}.")
+
+    visit(getattr(tree, "body", []), "")
+    return best[1] if best else None
+
+
 def _call_site(source: str, call: ast.Call, around: int = 3) -> str:
     lines = source.splitlines()
     start = max(call.lineno - around, 1)
@@ -601,6 +621,8 @@ class StaticCheck:
     verdict: str  # "breaks" | "compatible" | "unknown"
     detail: str
     snippet: str
+    call_line: int = 0
+    scope: str | None = None  # function enclosing the shown call site
 
     @property
     def rank(self) -> int:
@@ -685,7 +707,7 @@ def static_checks(
             *diff, f"call site on {caller} ({call_path}):", _call_site(call_src, call)
         ]) if diff else ""
         out.append(StaticCheck(line, name, changer, def_path, caller, call_path, change,
-                               verdict, text, snippet))
+                               verdict, text, snippet, call.lineno, _enclosing(call_tree, call)))
     return out
 
 

@@ -88,3 +88,15 @@ def test_claims_that_survive_the_repair_round_are_marked(
     monkeypatch.setattr("app.services.nemotron.complete", lambda p, **_k: LLMText(body, 10, 5))
     pair = sentinel.analyze(repo, "main", ["feat-a", "feat-b"], use_cache=False).pairs[0]
     assert pair.unsupported_claims == COMPAT
+
+
+def test_compatible_change_described_correctly_is_not_flagged() -> None:
+    # Verbatim rationale from a live run on demo/harmless-demo.
+    text = (
+        "The area function receives an optional scale parameter with a default of 1, keeping "
+        "existing calls valid; feat/summary calls area(w, h) which matches the new signature, "
+        "and the branches modify separate files with no textual overlap."
+    )
+    compat = ["area: compatible signature change (new optional scale), but all 2 call site(s) "
+              "in report.py on feat/summary match the new signature"]
+    assert claims.unsupported_claims(text, compat) == []

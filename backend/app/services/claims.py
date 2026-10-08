@@ -14,9 +14,15 @@ _SIGNATURE_BREAK = re.compile(
     r"TypeError|signature|argument|parameter|keyword|missing|required|old (?:API|call)",
     re.IGNORECASE,
 )
+# ...and asserts that something breaks.
+_BREAKS = re.compile(
+    r"TypeError|ValidationError|break|fail|error|crash|raise|incompatib|mismatch|old signature",
+    re.IGNORECASE,
+)
 _NOT_A_BREAK = re.compile(
     r"compatib|still match|matches the new|no (?:break|error|mismatch)|does(?: not|n't) break|"
-    r"(?:will|would) not break|won't break|safe|unaffected|not affected",
+    r"(?:will|would) not break|won't break|safe|unaffected|not affected|remain valid|still valid|"
+    r"keeps? (?:existing )?calls valid",
     re.IGNORECASE,
 )
 
@@ -38,6 +44,7 @@ def unsupported_claims(rationale: str, static_compatible: list[str]) -> list[str
             if (
                 pattern.search(sentence)
                 and _SIGNATURE_BREAK.search(sentence)
+                and _BREAKS.search(sentence)
                 and not _NOT_A_BREAK.search(sentence)
             ):
                 out.append(line)

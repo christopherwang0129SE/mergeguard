@@ -47,7 +47,7 @@ from app.services import cache, git_service, nemotron, prefilter
 from app.services.nemotron import NemotronError
 from app.services.usage import UsageMeter
 
-PROMPT_VERSION = "verify-v5"
+PROMPT_VERSION = "verify-v6"
 TEST_FILENAME = "test_mergeguard_intent.py"
 MAX_OUTPUT_CHARS = 4000
 MAX_FILE_CHARS = 5000
@@ -215,6 +215,9 @@ def build_test_prompt(
             snippets,
             "",
         ]
+    hints = break_hints(repo, base, branch_a, branch_b, evidence or [])
+    if hints:
+        sections += ["== Exact static check: call sites that no longer match ==", *hints, ""]
     for label, branch, paths in (("A", branch_a, py_a), ("B", branch_b, py_b)):
         sections.append(f"== Branch {label} ({branch}) commit messages ==")
         sections.append(_clip(git_service.commit_messages(repo, base, branch), 1500))
@@ -231,6 +234,29 @@ def build_test_prompt(
     sections.append("== Example of an existing test (import style) ==")
     sections.append(_existing_test_example(repo, base))
     return "\n".join(sections)
+
+
+def break_hints(
+    repo: Path, base: str, branch_a: str, branch_b: str, evidence: list[str]
+) -> list[str]:
+    """For each call site the static check proves broken: where the new code
+    path lives, so a test of the caller's intent can exercise it."""
+    out: list[str] = []
+    for check in prefilter.static_checks(repo, base, evidence):
+        if check.verdict != "breaks" or check.caller not in (branch_a, branch_b):
+            continue
+        label = "a" if check.caller == branch_a else "b"
+        where = f"{check.call_path}:{check.call_line}"
+        scope = f" inside {check.scope}()" if check.scope else ""
+        out.append(
+            f"- {check.label}. Branch {label.upper()} ({check.caller}) calls {check.name} at "
+            f"{where}{scope}. A test_branch_{label}_* that runs that code path (import it from "
+            f"{check.call_path}) passes on branch {label.upper()}, fails on the merge-base "
+            "(where that code does not exist yet) and fails on the merge."
+        )
+        if len(out) >= 3:
+            break
+    return out
 
 
 def build_repair_prompt(original: str, code: str, failures: list[VerifyRun], problem: str) -> str:
