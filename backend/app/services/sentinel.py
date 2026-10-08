@@ -458,8 +458,9 @@ def analyze(
     use_cache: bool = True,
     verify: bool = False,
     verify_allowed: bool = False,
+    focus: str | None = None,
 ) -> AnalyzeResponse:
-    """Score every branch pair.
+    """Score every branch pair (only pairs that include ``focus`` if given).
 
     ``verify`` runs verify-by-test on high-risk model-scored pairs.
     ``verify_allowed`` must be True for any generated test to execute: the
@@ -472,7 +473,8 @@ def analyze(
 
     pairs: list[PairRisk] = []
     for a, b in combinations(branches, 2):
-        pairs.append(_score_pair(diff_by_branch[a], diff_by_branch[b]))
+        if focus is None or focus in (a, b):
+            pairs.append(_score_pair(diff_by_branch[a], diff_by_branch[b]))
     pairs.sort(key=lambda p: p.score, reverse=True)
 
     signals = _prefilter_signals(repo, diff_by_branch, pairs)

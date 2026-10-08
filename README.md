@@ -254,6 +254,80 @@ What makes it stable:
   verify on the harmless fixture produced 2 false confirmations in one run
   (tests asserting `'half' not in perimeter.__code__.co_varnames`).
 
+## MCP server (for Cursor, Claude Code and other agents)
+
+`backend/mergeguard_mcp/` is a stdio MCP server (official `mcp` Python SDK,
+2.x) that runs the engine in-process, so an agent can ask "is it safe to merge
+this branch?" before it merges. Tools:
+
+| tool | what it returns |
+|---|---|
+| `check_merge_risk(repo_path, branch, base="main")` | every pair of `branch` with the other local branches, most dangerous first: level, score, verdict (`confirmed` / `suspected` / `error` / `not verified`), rationale, symbol evidence, static call-site breaks, tokens, plus total cost |
+| `list_conflicting_branches(repo_path, base="main")` | all risky pairs (confirmed or suspected, medium/high risk, static breaks, textual conflicts) |
+| `suggest_merge_order(repo_path, base="main")` | a deterministic order with a reason per step: no-risk branches first, unconfirmed risky ones next, test-confirmed conflicts last and one at a time (the partner is rebased and fixed before it merges) |
+
+All three also take `verify` (default `true`; `false` skips test generation)
+and `use_cache` (default `true`).
+
+Guardrails: only absolute paths of local git repos under the allowed roots
+(the bundled `demo/` folder plus `VERIFY_ALLOWED_ROOTS`, the same rule as
+verify-by-test; symlinks are resolved first); branch names must be existing
+local branches; one analysis at a time; clear error messages, no tracebacks;
+outputs carry no generated test code or raw test output, and configured API
+keys are scrubbed from every string.
+
+Setup (its own venv: `mcp` 2.x needs newer pydantic/starlette than the
+FastAPI backend pins):
+
+```bash
+uv venv .venv-mcp --python 3.12
+uv pip install --python .venv-mcp/bin/python -r backend/mergeguard_mcp/requirements.txt
+```
+
+The server reads `NEBIUS_API_KEY` from its environment. To keep the key out of
+client configs, point `MERGEGUARD_ENV_FILE` at a dotenv file; only `NEBIUS_*`
+entries are read from it. Without a key, scores come from the git heuristic
+and nothing is verified (the result says so in `note`).
+
+Cursor (`.cursor/mcp.json` in your project, or `~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "mergeguard": {
+      "command": "/ABS/PATH/mergeguard/.venv-mcp/bin/python",
+      "args": ["/ABS/PATH/mergeguard/backend/mergeguard_mcp/server.py"],
+      "env": {
+        "MERGEGUARD_ENV_FILE": "~/.config/mergeguard/nebius.env",
+        "VERIFY_ALLOWED_ROOTS": "/ABS/PATH/to/your/repos"
+      }
+    }
+  }
+}
+```
+
+Claude Code:
+
+```bash
+claude mcp add mergeguard \
+  -e MERGEGUARD_ENV_FILE=~/.config/mergeguard/nebius.env \
+  -e VERIFY_ALLOWED_ROOTS=/ABS/PATH/to/your/repos \
+  -- /ABS/PATH/mergeguard/.venv-mcp/bin/python /ABS/PATH/mergeguard/backend/mergeguard_mcp/server.py
+```
+
+End-to-end check over real stdio with the official MCP client
+(`backend/scripts/mcp_e2e.py`, full JSON in `backend/.workspace/mcp-e2e/`).
+Measured on 2026-10-08, first call per repo without cache:
+
+| repo | tool | time | result | cost |
+|---|---|---|---|---|
+| checkout demo | `check_merge_risk(feat/tax-before-discount)` | 23.2 s | confirmed conflict with `feat/discount-cap` (high, 90) | $0.0052 |
+| checkout demo | `list_conflicting_branches` | 3.3 s | 1 risky pair of 3, 1 confirmed (cached) | $0 |
+| checkout demo | `suggest_merge_order` | 3.1 s | `docs/readme`, then `feat/discount-cap` alone, then rebase `feat/tax-before-discount` | $0 |
+| daimon real case | `check_merge_risk(pr-17-deploy-review-findings)` | 78.3 s | confirmed conflict with `pr-14-sync-fixes` (high, 90), static break at `test_branding.py:77` | $0.0214 |
+| daimon real case | `list_conflicting_branches` / `suggest_merge_order` | 15.7 s each | 1 of 1 confirmed; merge #14 first, then rebase #17 (cached) | $0 |
+| guardrails | `/etc`, unknown branch | 0.0 s | `is_error` with a clear message | $0 |
+
 ## Tests
 
 ```bash
