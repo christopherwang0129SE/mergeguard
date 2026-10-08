@@ -31,6 +31,21 @@ Create a `.env` file in the frontend directory (if needed) with:
    VITE_API_BASE_URL=http://localhost:8000
    ```
 
+#### Demo repo path (`VITE_DEMO_REPO_PATH`)
+
+The **Try demo repo** button fills the repository field with the path to the
+demo repository (`demo/checkout-demo/`, see `demo/README.md`). The path is
+computed in `vite.config.ts` via `define` from the config's location, so it
+works from any checkout. To point the button at a different location, set
+`VITE_DEMO_REPO_PATH` in the environment (it takes precedence over the
+computed default):
+
+```bash
+VITE_DEMO_REPO_PATH=/some/other/path/to/checkout-demo npm run dev
+```
+
+Recreate the demo repo with `python3 demo/make_demo_repo.py` (idempotent).
+
 ### Running the Backend
 
 From the root of the repository, start the backend server:
@@ -70,9 +85,13 @@ To run the unit tests:
   - Remote Git URLs (`https://…`, `git@…`, `ssh://…`) are sent as `repo_url`.
   - Local paths (`/…`, `./…`, `~/…`) are sent as `repo_path`.
   - The two fields are mutually exclusive — only one is ever sent.
+  - **Try demo repo** fills the field with the demo repo path (`VITE_DEMO_REPO_PATH`, default `demo/checkout-demo/`).
+- **Summary Bar**: After an analyze, a card under the form shows the worst published level across pairs (e.g. `1 of 3 branch pairs at high risk`, or `No risky pairs among M`) and whether Nemotron agrees or disagrees with git (`Nemotron disagrees on N pair(s)` / `Nemotron agrees with git on all pairs` / `Git only: Nemotron unavailable`).
 - **Branch Risk Lights**: Shows a colored light for each branch indicating the highest risk level among pairs involving that branch (via `getBranchRiskLevel`).
-- **Pair Table**: Lists all branch pairs sorted by risk score (descending), showing the published `score`, `level`, `git_score` and `model_score` side by side, a `score_source` badge (`model` / `git`), a `fallback_reason` badge when present, and the `rationale`. Shows `risk_model` when set.
-- **Agent Status**: Driven by `GET /api/health` and shown before any analyze. Sentinel is **online** whenever health responds (git scoring works without Nebius) and **offline** when it does not. The mode is shown as **git only** or **git+Nemotron** (from `nebius_ready` / `nebius_enabled`, plus `nebius_model`). Planner and Merger are honestly shown as **planned**.
+- **Pair Table**: Lists all branch pairs sorted by risk score (descending). The published risk is shown in the Level column as `Risk N / 100` plus the level word. `git_score` and `model_score` are shown side by side. The source badge is `Nemotron` or `Git fallback` (with the `fallback_reason` appended, e.g. `Git fallback · no_api_key`).
+  - **Floor rule**: when `overlapping_files > 0` and `git_score > model_score`, a `Floor rule: N shared files` chip is shown and the rationale is two lines: the model's assessment plus `Floor rule: both branches touch <files>, so kept <Level>.` (file names from the overlapping `collisions`).
+  - **Hidden conflict**: when `score_source === 'model'` and the model level is higher than the git level (same thresholds as the backend: `>=70` high, `>=40` medium, `>0` low, else none), a `Nemotron flags hidden conflict` chip is shown, the full model rationale is displayed, and the row is highlighted.
+- **Agent Status**: A compact strip in the header, driven by `GET /api/health` and shown before any analyze. Sentinel is **online** whenever health responds (git scoring works without Nebius) and **offline** when it does not. The mode is shown as **git only** or **git+Nemotron** (from `nebius_ready` / `nebius_enabled`, plus `nebius_model` once, in mono). Planner and Merger are honestly shown as **soon** chips.
 - **Loading and Error States**: Handles loading, empty responses, and errors gracefully. Non-JSON error bodies (e.g. a gateway `502`) surface the status and text.
 
 ## API
@@ -91,6 +110,7 @@ The base URL is configurable via `VITE_API_BASE_URL` (default `http://localhost:
   - Medium: Amber (`#f59e0b`)
   - High: Red (`#ef4444`)
 - The level is also displayed as text for accessibility.
+- **Git level thresholds** (mirrored from the backend, `backend/app/services/sentinel.py` `_level`): a git score of `>=70` is **high**, `>=40` is **medium**, `>0` is **low**, otherwise **none**. Used by the hidden-conflict detection (`isHiddenConflict`) to compare the model level against the git level.
 - The dashboard uses minimal dependencies: React, Vite, and TypeScript.
 
 ## Development
