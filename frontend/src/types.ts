@@ -59,6 +59,39 @@ export interface PairRisk {
   model_cached?: boolean;
   prompt_tokens?: number;
   completion_tokens?: number;
+  verification?: Verification | null;
+}
+
+export type VerifyStatus = 'confirmed' | 'suspected' | 'error' | 'skipped';
+
+export interface VerifyRun {
+  target: 'a' | 'b' | 'base' | 'merge';
+  ref: string;
+  selection: string;
+  exit_code: number | null;
+  passed: number;
+  failed: number;
+  errors: number;
+  timed_out: boolean;
+  duration_s: number;
+  output: string;
+  cases?: Record<string, string>;
+}
+
+export interface Verification {
+  status: VerifyStatus;
+  reason: string;
+  test_code?: string | null;
+  test_path?: string | null;
+  runs: VerifyRun[];
+  attempts: number;
+  cached_test: boolean;
+  sandbox?: string | null;
+  merge_conflict: boolean;
+  confirming_tests?: string[];
+  duration_s: number;
+  prompt_tokens: number;
+  completion_tokens: number;
 }
 
 export interface UsageSummary {
@@ -76,6 +109,8 @@ export interface UsageSummary {
   pairs_sent_to_model: number;
   pairs_capped: number;
   top_k: number;
+  verify_pairs?: number;
+  verify_confirmed?: number;
   elapsed_s: number;
 }
 

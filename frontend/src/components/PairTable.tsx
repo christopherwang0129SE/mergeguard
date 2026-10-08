@@ -7,6 +7,7 @@ import {
   isHiddenConflict,
 } from '../utils/risk';
 import type { PairRisk } from '../types';
+import { VerificationDetails } from './VerificationDetails';
 
 interface PairTableProps {
   pairs: PairRisk[];
@@ -118,6 +119,9 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
                       </div>
                     ) : (
                       pair.rationale
+                    )}
+                    {pair.verification && (
+                      <VerificationDetails verification={pair.verification} />
                     )}
                   </td>
                 </tr>

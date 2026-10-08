@@ -16,5 +16,8 @@ export const usageLine = (usage: UsageSummary): string => {
   if (usage.pairs_prefiltered > 0) {
     parts.push(`${usage.pairs_prefiltered} filtered before LLM`);
   }
+  if (usage.verify_pairs && usage.verify_pairs > 0) {
+    parts.push(`${usage.verify_confirmed ?? 0}/${usage.verify_pairs} confirmed by test`);
+  }
   return parts.join(' · ');
 };
