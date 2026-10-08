@@ -67,10 +67,22 @@ To run the unit tests:
 ## Features
 
 - **Form Input**: Enter a repository path or URL and a base branch (defaults to `main`) to analyze.
-- **Branch Risk Lights**: Shows a colored light for each branch indicating the highest risk level among pairs involving that branch.
-- **Pair Table**: Lists all branch pairs sorted by risk score (descending), showing score, level, score source, rationale, and fallback reason if applicable.
-- **Agent Status**: Displays the status of the Sentinel agent (based on Nebius readiness) and notes that Planner and Merger are planned (not implemented).
-- **Loading and Error States**: Handles loading, empty responses, and errors gracefully.
+  - Remote Git URLs (`https://…`, `git@…`, `ssh://…`) are sent as `repo_url`.
+  - Local paths (`/…`, `./…`, `~/…`) are sent as `repo_path`.
+  - The two fields are mutually exclusive — only one is ever sent.
+- **Branch Risk Lights**: Shows a colored light for each branch indicating the highest risk level among pairs involving that branch (via `getBranchRiskLevel`).
+- **Pair Table**: Lists all branch pairs sorted by risk score (descending), showing the published `score`, `level`, `git_score` and `model_score` side by side, a `score_source` badge (`model` / `git`), a `fallback_reason` badge when present, and the `rationale`. Shows `risk_model` when set.
+- **Agent Status**: Driven by `GET /api/health` and shown before any analyze. Sentinel is **online** whenever health responds (git scoring works without Nebius) and **offline** when it does not. The mode is shown as **git only** or **git+Nemotron** (from `nebius_ready` / `nebius_enabled`, plus `nebius_model`). Planner and Merger are honestly shown as **planned**.
+- **Loading and Error States**: Handles loading, empty responses, and errors gracefully. Non-JSON error bodies (e.g. a gateway `502`) surface the status and text.
+
+## API
+
+All requests go to the backend under the `/api` prefix:
+
+- `POST {base}/api/analyze`
+- `GET {base}/api/health`
+
+The base URL is configurable via `VITE_API_BASE_URL` (default `http://localhost:8000`).
 
 ## Design Notes
 
@@ -88,11 +100,13 @@ This project was bootstrapped with [Vite](https://vitejs.dev/) using the React +
 ### Code Structure
 
 - `src/App.tsx`: Main application component.
-- `src/services/api.ts`: Service layer for communicating with the backend.
-- `src/types.ts`: TypeScript interfaces for the API responses.
+- `src/services/api.ts`: Service layer for communicating with the backend (`/api/analyze`, `/api/health`).
+- `src/types.ts`: TypeScript interfaces for the API requests/responses.
 - `src/utils/risk.ts`: Utility functions for mapping risk levels to colors and text, computing branch risk levels, and sorting pairs.
+- `src/utils/repo.ts`: Classifies a repository input into `repo_url` or `repo_path`.
+- `src/utils/agent.ts`: Derives Sentinel status (online/offline) and mode (git only / git+Nemotron) from health.
 - `src/components/`: Contains `BranchLights`, `PairTable`, and `AgentStatus` components.
-- `src/utils/risk.test.ts`: Unit tests for the risk utilities.
+- `src/utils/risk.test.ts`, `src/utils/repo.test.ts`, `src/utils/agent.test.ts`, `src/services/api.test.ts`, and `src/components/*.test.tsx`: Unit and render tests.
 
 ## Acknowledgements
 
