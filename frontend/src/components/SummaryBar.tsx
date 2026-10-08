@@ -6,10 +6,12 @@ import {
   isHiddenConflict,
   effectivePairLevel,
 } from '../utils/risk';
-import type { PairRisk, RiskLevel } from '../types';
+import type { PairRisk, RiskLevel, UsageSummary } from '../types';
+import { usageLine } from '../utils/usage';
 
 interface SummaryBarProps {
   pairs: PairRisk[];
+  usage?: UsageSummary | null;
 }
 
 /**
@@ -40,7 +42,7 @@ const disagreeCount = (pairs: PairRisk[]): number =>
 const modelUsedCount = (pairs: PairRisk[]): number =>
   pairs.filter((pair) => pair.score_source === 'model').length;
 
-export const SummaryBar = ({ pairs }: SummaryBarProps) => {
+export const SummaryBar = ({ pairs, usage }: SummaryBarProps) => {
   const total = pairs.length;
   const worst = worstLevel(pairs);
   const hidden = pairs.filter((pair) => isHiddenConflict(pair)).length;
@@ -70,7 +72,9 @@ export const SummaryBar = ({ pairs }: SummaryBarProps) => {
   }
 
   let line2: string;
-  if (modelUsed === 0) {
+  if (modelUsed === 0 && total > 0 && pairs.every((pair) => pair.fallback_reason === 'prefiltered')) {
+    line2 = 'No pair needed Nemotron: static prefilter found no overlap';
+  } else if (modelUsed === 0) {
     line2 = 'Git only: Nemotron unavailable';
   } else if (disagree > 0) {
     line2 = `Nemotron disagrees on ${disagree} pair(s)`;
@@ -87,6 +91,11 @@ export const SummaryBar = ({ pairs }: SummaryBarProps) => {
     >
       <div className="summary-line1">{line1}</div>
       <div className="summary-line2">{line2}</div>
+      {usage && (
+        <div className="summary-usage" data-testid="summary-usage">
+          {usageLine(usage)}
+        </div>
+      )}
     </div>
   );
 };

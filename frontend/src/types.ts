@@ -29,7 +29,14 @@ export interface FileCollision {
 
 export type RiskLevel = 'none' | 'low' | 'medium' | 'high';
 export type ScoreSource = 'model' | 'git';
-export type FallbackReason = 'no_api_key' | 'disabled' | 'pair_cap' | 'model_error' | 'unparsable' | null;
+export type FallbackReason =
+  | 'no_api_key'
+  | 'disabled'
+  | 'prefiltered'
+  | 'pair_cap'
+  | 'model_error'
+  | 'unparsable'
+  | null;
 
 export interface PairRisk {
   branch_a: string;
@@ -47,6 +54,29 @@ export interface PairRisk {
   model_level?: RiskLevel | null;
   model_rationale?: string | null;
   fallback_reason?: FallbackReason;
+  symbol_overlap?: string[];
+  prefilter_candidate?: boolean;
+  model_cached?: boolean;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+}
+
+export interface UsageSummary {
+  model: string;
+  llm_calls: number;
+  cache_hits: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+  input_usd_per_1m: number;
+  output_usd_per_1m: number;
+  pairs_total: number;
+  pairs_prefiltered: number;
+  pairs_sent_to_model: number;
+  pairs_capped: number;
+  top_k: number;
+  elapsed_s: number;
 }
 
 export interface AnalyzeResponse {
@@ -55,6 +85,7 @@ export interface AnalyzeResponse {
   diffs: BranchDiff[];
   pairs: PairRisk[];
   risk_model?: string | null;
+  usage?: UsageSummary | null;
 }
 
 export interface HealthResponse {

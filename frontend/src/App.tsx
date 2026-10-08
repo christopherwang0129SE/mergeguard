@@ -123,7 +123,7 @@ function App() {
 
         {response && (
           <>
-            <SummaryBar pairs={response.pairs} />
+            <SummaryBar pairs={response.pairs} usage={response.usage ?? null} />
             <BranchLights branches={response.branches} pairs={response.pairs} />
             <PairTable pairs={response.pairs} risk_model={response.risk_model ?? null} />
           </>

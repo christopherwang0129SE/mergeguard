@@ -218,6 +218,13 @@ main.container > * + * {
   margin-top: 4px;
 }
 
+.summary-usage {
+  margin-top: 4px;
+  font-size: 0.8rem;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
 /* --- Branch lights --- */
 .lights {
   display: flex;

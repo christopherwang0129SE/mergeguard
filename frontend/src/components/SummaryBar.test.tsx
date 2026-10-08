@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { SummaryBar } from './SummaryBar'
-import type { PairRisk } from '../types'
+import { usageLine, formatCost } from '../utils/usage'
+import type { PairRisk, UsageSummary } from '../types'
 
 const pair = (
   a: string,
@@ -227,6 +228,63 @@ describe('SummaryBar', () => {
     render(<SummaryBar pairs={pairs} />)
     expect(
       screen.getByText('2 of 3 branch pairs at medium risk · 1 hidden')
+    ).toBeInTheDocument()
+  })
+})
+
+
+const usage = (extra: Partial<UsageSummary> = {}): UsageSummary => ({
+  model: 'nvidia/nemotron-3-super-120b-a12b',
+  llm_calls: 1,
+  cache_hits: 0,
+  prompt_tokens: 1151,
+  completion_tokens: 407,
+  total_tokens: 1558,
+  estimated_cost_usd: 0.0007116,
+  input_usd_per_1m: 0.3,
+  output_usd_per_1m: 0.9,
+  pairs_total: 3,
+  pairs_prefiltered: 2,
+  pairs_sent_to_model: 1,
+  pairs_capped: 0,
+  top_k: 5,
+  elapsed_s: 3.0,
+  ...extra,
+})
+
+describe('SummaryBar usage', () => {
+  it('shows tokens and estimated cost in the summary bar', () => {
+    render(<SummaryBar pairs={[pair('a', 'b', 50, 'medium')]} usage={usage()} />)
+    expect(screen.getByTestId('summary-usage')).toHaveTextContent(
+      '1 LLM call · 1,558 tokens · $0.0007 est. · 2 filtered before LLM'
+    )
+  })
+
+  it('shows cache hits and zero cost on a cached re-run', () => {
+    const line = usageLine(
+      usage({ llm_calls: 0, cache_hits: 1, total_tokens: 0, estimated_cost_usd: 0, pairs_prefiltered: 0 })
+    )
+    expect(line).toBe('0 LLM calls · 0 tokens · $0.0000 est. · 1 cached')
+  })
+
+  it('omits the usage line when the response has no usage', () => {
+    render(<SummaryBar pairs={[pair('a', 'b', 50, 'medium')]} />)
+    expect(screen.queryByTestId('summary-usage')).toBeNull()
+  })
+
+  it('formats cost with four decimals', () => {
+    expect(formatCost(0.00123456)).toBe('$0.0012')
+  })
+
+  it('says the prefilter skipped the model when every pair was filtered', () => {
+    render(
+      <SummaryBar
+        pairs={[pair('a', 'b', 0, 'none', { fallback_reason: 'prefiltered' })]}
+        usage={usage({ llm_calls: 0, total_tokens: 0, estimated_cost_usd: 0 })}
+      />
+    )
+    expect(
+      screen.getByText('No pair needed Nemotron: static prefilter found no overlap')
     ).toBeInTheDocument()
   })
 })
