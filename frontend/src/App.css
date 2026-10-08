@@ -1,99 +1,224 @@
+/* --- Layout --- */
 #dashboard {
-  padding: 24px 0 48px;
+  min-height: 100vh;
+  background: #fff;
 }
 
 .container {
-  max-width: 960px;
+  max-width: 1200px;
   margin: 0 auto;
-  text-align: left;
+  padding: 0 48px;
 }
 
-h1 {
-  margin: 0 0 24px;
+main.container {
+  padding-top: 40px;
+  padding-bottom: 64px;
+}
+
+main.container > * + * {
+  margin-top: 40px;
+}
+
+/* --- Header --- */
+.app-header {
+  padding: 40px 0 0;
+}
+
+.header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.tagline {
+  font-size: 16px;
+  line-height: 24px;
+  color: #4b5563;
+  margin-top: 4px;
+}
+
+/* --- Agent strip (compact, in header) --- */
+.agent-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.agent-sentinel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.agent-mode {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.agent-soon {
+  font-size: 12px;
+  font-weight: 500;
+  color: #6b7280;
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 
 /* --- Form --- */
 .input-form {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
   align-items: flex-end;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--code-bg);
+  gap: 16px;
 }
 
-.input-form > div {
+.field {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  flex: 1 1 240px;
 }
 
-.input-form label {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-h);
+.field-repo {
+  flex: 1;
+  min-width: 480px;
 }
 
-.input-form input {
+.field-base {
+  width: 180px;
+}
+
+.field label {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.field input {
   font: inherit;
-  color: var(--text-h);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  font-size: 16px;
+  line-height: 24px;
+  color: #111827;
+  background: #fff;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 10px 12px;
+  height: 44px;
+  box-sizing: border-box;
 }
 
-.input-form input:focus-visible {
-  outline: 2px solid var(--accent);
+.field input:focus-visible {
+  outline: 2px solid #1d4ed8;
   outline-offset: 1px;
 }
 
-.input-form button {
+.btn-primary {
+  height: 44px;
+  padding: 0 24px;
   font: inherit;
+  font-size: 16px;
   font-weight: 600;
   color: #fff;
-  background: var(--accent);
+  background: #1d4ed8;
   border: none;
-  border-radius: 6px;
-  padding: 10px 20px;
+  border-radius: 8px;
   cursor: pointer;
 }
 
-.input-form button:disabled {
+.btn-primary:hover:not(:disabled) {
+  background: #1e40af;
+}
+
+.btn-primary:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
 
+.btn-secondary {
+  height: 44px;
+  padding: 0 16px;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 500;
+  color: #374151;
+  background: #fff;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  background: #f9fafb;
+}
+
+.form-hint {
+  font-size: 16px;
+  line-height: 24px;
+  color: #4b5563;
+  margin-top: 12px;
+}
+
 /* --- States --- */
 .error {
-  margin-top: 16px;
   padding: 12px 14px;
   border: 1px solid #ef4444;
   border-radius: 8px;
-  background: rgba(239, 68, 68, 0.1);
-  color: var(--text-h);
+  background: rgba(239, 68, 68, 0.08);
+  color: #b91c1c;
 }
 
 .loading {
-  margin-top: 16px;
-  color: var(--text);
+  color: #4b5563;
 }
 
 .empty-state {
-  color: var(--text);
+  color: #4b5563;
   font-style: italic;
 }
 
-/* --- Branch lights --- */
-.branch-lights,
-.pair-table,
-.agent-status {
-  margin-top: 32px;
+/* --- Summary bar --- */
+.summary-bar {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-left: 4px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 24px;
 }
 
+.summary-line1 {
+  font-size: 28px;
+  line-height: 36px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.summary-line2 {
+  font-size: 16px;
+  line-height: 24px;
+  color: #4b5563;
+  margin-top: 4px;
+}
+
+/* --- Branch lights --- */
 .lights {
   display: flex;
   flex-wrap: wrap;
@@ -105,7 +230,7 @@ h1 {
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
-  border: 1px solid var(--border);
+  border: 1px solid #e5e7eb;
   border-radius: 8px;
   min-width: 180px;
 }
@@ -118,35 +243,52 @@ h1 {
 }
 
 .light-label {
-  color: var(--text-h);
+  color: #111827;
   font-weight: 500;
+  font-size: 15px;
 }
 
 /* --- Pair table --- */
 .pair-table table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
 }
 
 .pair-table th,
 .pair-table td {
   text-align: left;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-h);
+  padding: 10px 12px;
+  border-bottom: 1px solid #e5e7eb;
+  color: #111827;
   vertical-align: top;
+  font-size: 15px;
+  line-height: 22px;
 }
 
 .pair-table th {
+  font-size: 13px;
+  line-height: 18px;
   font-weight: 600;
-  background: var(--code-bg);
+  color: #4b5563;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
-.risk-model {
-  margin-bottom: 12px;
-  color: var(--text);
+.branch-name {
+  font-family: var(--mono);
   font-size: 14px;
+  white-space: nowrap;
+}
+
+.risk-number {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #111827;
+}
+
+.level-word {
+  font-weight: 600;
 }
 
 .level-dot {
@@ -158,55 +300,55 @@ h1 {
   vertical-align: middle;
 }
 
+/* Highlighted row: Nemotron flagged a hidden conflict. */
+.row-hidden-conflict {
+  border-left: 4px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.rationale-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 /* --- Badges --- */
 .badge {
   display: inline-block;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: 6px;
   font-size: 12px;
-  font-weight: 600;
-  line-height: 1.4;
+  font-weight: 500;
+  line-height: 18px;
 }
 
-.badge-model {
-  background: rgba(170, 59, 255, 0.15);
-  color: var(--accent);
-  border: 1px solid var(--accent-border);
+.badge-source {
+  background: #f3f4f6;
+  color: #374151;
+  border: 1px solid #d1d5db;
 }
 
-.badge-git {
-  background: var(--code-bg);
-  color: var(--text-h);
-  border: 1px solid var(--border);
+.fallback-reason {
+  font-size: 11px;
+  color: #6b7280;
 }
 
-.badge-fallback {
-  background: rgba(245, 158, 11, 0.15);
+.badge-hidden {
+  background: #fef3c7;
   color: #92400e;
-  border: 1px solid rgba(245, 158, 11, 0.5);
+  border: 1px solid #f59e0b;
+  align-self: flex-start;
 }
 
-/* --- Agent status --- */
-.status-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
+.badge-floor {
+  background: #eff6ff;
+  color: #1e40af;
+  border: 1px solid #93c5fd;
+  align-self: flex-start;
 }
 
-.status-item:last-child {
-  border-bottom: none;
-}
-
-.status-dot {
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.status-text {
-  color: var(--text-h);
+.risk-model {
+  margin-bottom: 12px;
+  color: #4b5563;
+  font-size: 14px;
 }
