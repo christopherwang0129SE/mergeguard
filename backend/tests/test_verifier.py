@@ -622,3 +622,106 @@ def test_break_hints_point_the_test_at_the_broken_call_site(tmp_path: Path) -> N
     ]
     prompt = verifier.build_test_prompt(r, "main", "fields", "caller", evidence=evidence)
     assert "== Exact static check: call sites that no longer match ==" in prompt
+
+
+# Verbatim (trimmed docstrings) from a live forced-verify run on two harmless
+# branches of demo/harmless-demo: it "confirmed" by inspecting code and by
+# expecting the other branch's function to be missing.
+GAMED_LIVE = '''import inspect
+from geometry import perimeter
+
+
+def test_branch_a_summary_no_half_in_perimeter():
+    try:
+        from report import summary
+    except ImportError:
+        assert False, "summary() missing (branch A's change)"
+    src = inspect.getsource(perimeter)
+    assert 'half' not in src, (
+        f"perimeter() should not contain 'half', but got:\\n{src}"
+    )
+    assert summary(2, 3) == {"area": 6, "perimeter": 10}
+
+
+def test_branch_b_perimeter_has_half_and_no_summary():
+    src = inspect.getsource(perimeter)
+    assert 'half' in src
+    try:
+        from report import summary
+        assert False, "summary() should not be present (branch B's intent)"
+    except ImportError:
+        pass
+
+
+def test_branch_a_scale_and_perimeter_not_refactored():
+    assert 'half' not in perimeter.__code__.co_varnames
+
+
+def test_branch_b_behaviour_only():
+    assert perimeter(2, 3) == 10
+'''
+
+GAMED_CALC = '''import inspect
+import calc
+
+
+def test_branch_a_scale_source():
+    # branch A changed the multiplier; B's change must not be there
+    src = inspect.getsource(calc)
+    assert "x * 3" in src
+    assert "+ 10" not in src
+
+
+def test_branch_b_total_consts():
+    assert 10 in calc.total.__code__.co_consts
+    assert not hasattr(calc, "never_defined") or "x * 3" not in inspect.getsource(calc)
+    assert "x * 3" not in inspect.getsource(calc.scale)
+'''
+
+
+def test_behaviour_problems_flag_code_inspection_and_absence_checks() -> None:
+    found = verifier.behaviour_problems(GAMED_LIVE)
+    assert set(found) == {
+        "test_branch_a_summary_no_half_in_perimeter",
+        "test_branch_b_perimeter_has_half_and_no_summary",
+        "test_branch_a_scale_and_perimeter_not_refactored",
+    }
+    assert "passes when a name is missing (except ImportError)" in found[
+        "test_branch_b_perimeter_has_half_and_no_summary"]
+    assert found["test_branch_a_scale_and_perimeter_not_refactored"] == [
+        "inspects code (.__code__)", "inspects code (.co_varnames)"]
+    lines = verifier.shape_lines(GAMED_LIVE)
+    code_lines = GAMED_LIVE.splitlines()
+    a_lines = {code_lines[i - 1].strip() for i in lines["test_branch_a_summary_no_half_in_perimeter"]}
+    # The value derived from inspect.getsource is tainted; the behaviour check is not.
+    assert "assert 'half' not in src, (" in a_lines
+    assert 'assert summary(2, 3) == {"area": 6, "perimeter": 10}' not in a_lines
+    # A try that fails when the name exists does not "tolerate" absence here
+    # (assert False in the handler), so it is not flagged.
+    assert 'assert False, "summary() missing (branch A\'s change)"' not in a_lines
+
+
+def test_shape_failures_never_confirm_but_behaviour_failures_still_do(
+    vrepo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompts: list[str] = []
+    monkeypatch.setattr("app.services.nemotron.complete", _scripted([GAMED_CALC], prompts))
+    result = verifier.verify_pair(vrepo, "main", _pair(), use_cache=False)
+    run_m = result.runs[-1]
+    assert run_m.failed == 2 and set(run_m.failure_lines) == set(run_m.cases)
+    assert result.status == "suspected", result.reason
+    assert result.confirming_tests == []
+    assert result.reason.startswith("merge only fails tests that inspect code")
+    assert "check code shape or absence instead of behaviour" in prompts[1]
+
+    # The same hasattr() noise in an otherwise behavioural test: the merge
+    # fails on the behaviour line, so it still confirms.
+    noisy = GOOD_TEST.replace(
+        "    assert calc.total(1) == 12",
+        "    assert hasattr(calc, 'total')\n    assert calc.total(1) == 12",
+    )
+    prompts.clear()
+    monkeypatch.setattr("app.services.nemotron.complete", _scripted([noisy], prompts))
+    result = verifier.verify_pair(vrepo, "main", _pair(), use_cache=False)
+    assert result.status == "confirmed", result.reason
+    assert result.confirming_tests == ["test_branch_b_total_adds_ten"]

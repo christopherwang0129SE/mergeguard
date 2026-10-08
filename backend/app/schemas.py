@@ -73,6 +73,8 @@ class VerifyRun(BaseModel):
     output: str = ""
     # Per test function: "passed" | "failed" | "error" | "skipped".
     cases: dict[str, str] = Field(default_factory=dict)
+    # Per failed test function: line in the test module where it failed.
+    failure_lines: dict[str, int] = Field(default_factory=dict)
 
 
 class Verification(BaseModel):

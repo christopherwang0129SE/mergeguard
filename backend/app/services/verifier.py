@@ -15,7 +15,10 @@ For a high-risk pair, Nemotron writes one small pytest module with
 that passes on its branch, fails on the merge-base (so it captures that
 branch's change) and fails on the merge (assertion failure). A test that only
 pins unchanged base behaviour can never confirm, so a docs-only branch cannot
-"conflict" with a code change. Ran but missed that bar -> ``suspected``. Could not
+"conflict" with a code change. Neither can a test that inspects code instead of
+running it (source text, code objects, signatures, hasattr/dir) or that passes
+only while the other branch's change is absent (catching ImportError /
+AttributeError): two harmless refactors "conflict" under such tests. Ran but missed that bar -> ``suspected``. Could not
 generate or run a usable test -> ``error``.
 
 Safety: only for local repos under the allowed roots (default: the bundled
@@ -47,7 +50,7 @@ from app.services import cache, git_service, nemotron, prefilter
 from app.services.nemotron import NemotronError
 from app.services.usage import UsageMeter
 
-PROMPT_VERSION = "verify-v7"
+PROMPT_VERSION = "verify-v8"
 TEST_FILENAME = "test_mergeguard_intent.py"
 MAX_OUTPUT_CHARS = 4000
 MAX_FILE_CHARS = 5000
@@ -90,6 +93,12 @@ SYSTEM_PROMPT = (
     "module level (no classes). The same module runs on branch A, branch B, "
     "their merge-base and their merge, so import anything that exists on only "
     "one branch inside that branch's test functions, not at module level. "
+    "Test observable behaviour only: call the code and assert on return values or "
+    "raised errors. Never inspect source text, code objects, signatures or "
+    "attributes (no inspect, __code__, hasattr, dir), and never assert that the "
+    "other branch's change is absent: a test that fails only because the other "
+    "branch's code exists is not a conflict. If the two changes do not interact, "
+    "write honest tests that pass on the merge. "
     "Reply with only the code in a single ```python block."
 )
 
@@ -259,7 +268,8 @@ def break_hints(
     return out
 
 
-def sharpen_problem(runs: list[VerifyRun], hints: list[str]) -> str:
+def sharpen_problem(runs: list[VerifyRun], hints: list[str],
+                    shape: dict[str, list[str]] | None = None) -> str:
     """Feedback when every test passes on its branch but none confirms."""
     by_target = {r.target: r for r in runs}
     base = by_target.get("base")
@@ -279,6 +289,13 @@ def sharpen_problem(runs: list[VerifyRun], hints: list[str]) -> str:
         text += (
             " These tests also pass on the merge-base, so they pin unchanged behaviour instead "
             "of their branch's change: " + ", ".join(pinned) + "."
+        )
+    if shape:
+        text += (
+            " These tests do not count because they check code shape or absence instead of "
+            "behaviour: " + "; ".join(f"{n} ({', '.join(r)})" for n, r in sorted(shape.items()))
+            + ". Call the code and assert on its results; if the changes do not interact, "
+            "the honest tests pass on the merge."
         )
     if hints:
         text += " Use the exact static check:\n" + "\n".join(hints)
@@ -451,6 +468,25 @@ def _junit_cases(path: Path) -> dict[str, str]:
     return cases
 
 
+def _junit_failure_lines(path: Path) -> dict[str, int]:
+    """Per failed test function: the line in the generated test module where
+    it failed (the outermost frame of that module in the traceback)."""
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        return {}
+    out: dict[str, int] = {}
+    pattern = re.compile(re.escape(TEST_FILENAME) + r":(\d+)")
+    for case in root.iter("testcase"):
+        failure = case.find("failure")
+        if failure is None or not case.get("name"):
+            continue
+        match = pattern.search((failure.text or "") + "\n" + (failure.get("message") or ""))
+        if match:
+            out[case.get("name", "")] = int(match.group(1))
+    return out
+
+
 def _junit_counts(path: Path) -> tuple[int, int, int]:
     """(passed, failed, errors) from a pytest junit XML report."""
     try:
@@ -544,6 +580,7 @@ def run_test(
         duration_s=duration,
         output=_clip(text, MAX_OUTPUT_CHARS),
         cases=_junit_cases(report),
+        failure_lines=_junit_failure_lines(report),
     )
 
 
@@ -673,12 +710,155 @@ def _generate(prompt: str, *, thinking: bool = True) -> _Generated:
     return _Generated(extract_code(reply), prompt_tokens, completion_tokens)
 
 
-def confirming_tests(runs: list[VerifyRun]) -> list[str]:
-    """Intent tests that pass on their branch, fail on the base and fail on the merge."""
+_INTROSPECTION_MODULES = {"inspect", "dis", "ast", "tokenize", "linecache"}
+_INTROSPECTION_ATTRS = {
+    "__code__", "co_varnames", "co_names", "co_consts", "co_argcount", "co_code",
+    "__defaults__", "__kwdefaults__", "__signature__", "__annotations__", "__wrapped__",
+    "__dict__", "__closure__", "__globals__",
+}
+_INTROSPECTION_CALLS = {"hasattr", "dir", "vars"}
+_ABSENCE_ERRORS = {"ImportError", "ModuleNotFoundError", "AttributeError", "NameError"}
+_FAILING_CALLS = {"fail", "skip", "xfail", "importorskip"}
+
+
+def _exc_names(node: ast.expr | None) -> set[str]:
+    if node is None:
+        return set()
+    elts = node.elts if isinstance(node, ast.Tuple) else [node]
+    return {e.id if isinstance(e, ast.Name) else e.attr if isinstance(e, ast.Attribute) else ""
+            for e in elts}
+
+
+def _handler_tolerates(handler: ast.ExceptHandler) -> bool:
+    """True if this ``except ImportError`` (etc.) lets the test pass."""
+    for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+        if isinstance(node, (ast.Raise, ast.Assert)):
+            return False
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name in _FAILING_CALLS:
+                return False
+    return True
+
+
+def _flag_reason(node: ast.AST, aliases: set[str]) -> str | None:
+    if isinstance(node, ast.Name) and node.id in aliases:
+        return f"inspects code ({node.id})"
+    if isinstance(node, ast.Attribute) and node.attr in _INTROSPECTION_ATTRS:
+        return f"inspects code (.{node.attr})"
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in _INTROSPECTION_CALLS:
+            return f"checks attributes ({func.id}())"
+        if isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) == 3:
+            return "checks attributes (getattr with default)"
+        if (isinstance(func, ast.Attribute) and func.attr == "raises"
+                and node.args and _exc_names(node.args[0]) & _ABSENCE_ERRORS):
+            return "expects a name to be missing (pytest.raises)"
+    if isinstance(node, ast.ExceptHandler):
+        hit = _exc_names(node.type) & _ABSENCE_ERRORS
+        if hit and _handler_tolerates(node):
+            return "passes when a name is missing (except " + "/".join(sorted(hit)) + ")"
+    return None
+
+
+def _introspection_aliases(nodes) -> set[str]:
+    aliases: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            aliases |= {(a.asname or a.name).split(".")[0] for a in node.names
+                        if a.name.split(".")[0] in _INTROSPECTION_MODULES}
+        elif (isinstance(node, ast.ImportFrom)
+              and (node.module or "").split(".")[0] in _INTROSPECTION_MODULES):
+            aliases |= {a.asname or a.name for a in node.names}
+    return aliases
+
+
+_SIMPLE_STMTS = (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Expr, ast.Assert,
+                 ast.Return, ast.Raise)
+
+
+def shape_lines(code: str) -> dict[str, set[int]]:
+    """Per flagged test function: the lines whose failure says nothing about
+    behaviour (statements that inspect code or check absence, statements that
+    use a value derived from such an inspection, whole ``try``/``with`` blocks
+    that tolerate or expect a missing name)."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+    module_aliases = _introspection_aliases(tree.body)
+    out: dict[str, set[int]] = {}
+    for fn in tree.body:
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or not fn.name.startswith("test_"):
+            continue
+        aliases = module_aliases | _introspection_aliases(ast.walk(fn))
+        lines: set[int] = set()
+        tainted: set[str] = set()
+
+        def span(n: ast.AST) -> range:
+            return range(n.lineno, (getattr(n, "end_lineno", None) or n.lineno) + 1)
+
+        for _ in range(2):  # second pass picks up names tainted later in the function
+            for st in sorted((n for n in ast.walk(fn) if isinstance(n, ast.stmt) and n is not fn),
+                             key=lambda n: n.lineno):
+                if isinstance(st, ast.Try) and any(_flag_reason(h, aliases) for h in st.handlers):
+                    lines.update(span(st))
+                elif isinstance(st, (ast.With, ast.AsyncWith)) and any(
+                        _flag_reason(sub, aliases) for item in st.items
+                        for sub in ast.walk(item.context_expr)):
+                    lines.update(span(st))
+                elif isinstance(st, _SIMPLE_STMTS):
+                    subs = list(ast.walk(st))
+                    if any(_flag_reason(n, aliases) for n in subs) or any(
+                            isinstance(n, ast.Name) and n.id in tainted
+                            and isinstance(n.ctx, ast.Load) for n in subs):
+                        lines.update(span(st))
+                        targets = st.targets if isinstance(st, ast.Assign) else (
+                            [st.target] if isinstance(st, (ast.AnnAssign, ast.AugAssign)) else [])
+                        for t in targets:
+                            tainted |= {n.id for n in ast.walk(t) if isinstance(n, ast.Name)}
+                elif isinstance(st, (ast.If, ast.While)) and any(
+                        _flag_reason(n, aliases) for n in ast.walk(st.test)):
+                    lines.update(span(st.test))
+        if lines:
+            out[fn.name] = lines
+    return out
+
+
+def behaviour_problems(code: str) -> dict[str, list[str]]:
+    """Test functions that check code shape or absence instead of behaviour.
+
+    Such a test can "capture" a harmless refactor (``'half' in
+    perimeter.__code__.co_varnames``) or fail just because the other branch's
+    code exists (``from report import summary`` expected to raise). A failure
+    on one of its ``shape_lines`` is never evidence of a semantic conflict.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+    module_aliases = _introspection_aliases(tree.body)
+    out: dict[str, list[str]] = {}
+    for fn in tree.body:
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or not fn.name.startswith("test_"):
+            continue
+        aliases = module_aliases | _introspection_aliases(ast.walk(fn))
+        found = {r for n in ast.walk(fn) if (r := _flag_reason(n, aliases))}
+        if found:
+            out[fn.name] = sorted(found)
+    return out
+
+
+def confirming_tests(runs: list[VerifyRun], code: str | None = None) -> list[str]:
+    """Intent tests that pass on their branch, fail on the base and fail on the
+    merge, and test behaviour (see ``behaviour_problems``)."""
     by_target = {r.target: r for r in runs}
     a, b, base, merge = (by_target.get(k) for k in ("a", "b", "base", "merge"))
     if not (a and b and base and merge) or merge.timed_out:
         return []
+    shape = shape_lines(code) if code else {}
     out: list[str] = []
     for name, outcome in sorted(merge.cases.items()):
         if outcome != "failed":
@@ -688,6 +868,8 @@ def confirming_tests(runs: list[VerifyRun]) -> list[str]:
             continue
         if base.cases.get(name) == "passed":
             continue  # pins unchanged base behaviour; not evidence of a conflict
+        if name in shape and merge.failure_lines.get(name, 0) in shape[name] | {0}:
+            continue  # failed where it inspects code or expects absence, not on behaviour
         out.append(name)
     return out
 
@@ -836,7 +1018,7 @@ def verify_pair(
                 own_ok = _run_ok(runs[0]) and _run_ok(runs[1])
                 # A confirming test is evidence on its own: other generated tests
                 # that fail on their own branch are broken tests, not counter-evidence.
-                if confirming_tests(runs) or (own_ok and wt.merge_conflict) or cached_test:
+                if confirming_tests(runs, code) or (own_ok and wt.merge_conflict) or cached_test:
                     break
                 if attempts >= max_attempts:
                     break
@@ -852,7 +1034,8 @@ def verify_pair(
                     next_prompt = build_repair_prompt(prompt, code, failing, problem)
                 else:
                     next_prompt = build_repair_prompt(
-                        prompt, code, runs[2:], sharpen_problem(runs, hints)
+                        prompt, code, runs[2:],
+                        sharpen_problem(runs, hints, behaviour_problems(code)),
                     )
                 code = None
 
@@ -863,7 +1046,8 @@ def verify_pair(
 
             own_ok = len(runs) >= 2 and _run_ok(runs[0]) and _run_ok(runs[1])
             run_m = next((r for r in runs if r.target == "merge"), None)
-            confirming = confirming_tests(runs)
+            confirming = confirming_tests(runs, code)
+            shape = set(behaviour_problems(code))
             if confirming and run_m is not None and not run_m.timed_out:
                 status = "confirmed"
                 reason = (
@@ -886,6 +1070,14 @@ def verify_pair(
                 status, reason = "suspected", "textual merge conflict: git merge --no-commit failed"
             elif run_m.timed_out:
                 status, reason = "error", "test timed out on the merge"
+            elif run_m.failed > 0 and any(
+                outcome == "failed" and name in shape for name, outcome in run_m.cases.items()
+            ):
+                status = "suspected"
+                reason = ("merge only fails tests that inspect code or expect the other "
+                          "branch's change to be absent, not behaviour: "
+                          + ", ".join(sorted(n for n, o in run_m.cases.items()
+                                             if o == "failed" and n in shape)))
             elif run_m.failed > 0:
                 status = "suspected"
                 reason = "merge only fails tests that pin unchanged base behaviour"

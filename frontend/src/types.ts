@@ -82,6 +82,7 @@ export interface VerifyRun {
   duration_s: number;
   output: string;
   cases?: Record<string, string>;
+  failure_lines?: Record<string, number>;
 }
 
 export interface Verification {
