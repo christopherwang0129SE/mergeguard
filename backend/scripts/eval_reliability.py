@@ -15,6 +15,10 @@ Cases (local repos under demo/, built if missing):
 - harmless-demo: every pair is harmless (demo/make_harmless_repo.py).
 - harmless-demo-forced-verify: the same repo with verify-by-test forced on
   EVERY pair (normally harmless pairs never reach verify); --forced-runs runs.
+- Hall of Fame replays (not in the default set; pass --cases): kiss
+  (ThinkersJournal/KISS PR #311 x #315) and elastic
+  (elastic/observability-migration-platform PR #381 x #383), built by
+  demo/replay.py --case NAME; each PR pair is expected to be confirmed.
 
 A harmless pair must never be confirmed. Raw results go to
 backend/.workspace/eval/<timestamp>/ (gitignored).
@@ -48,13 +52,14 @@ class Case:
     build: list[str]
     expect_confirmed: set[frozenset[str]]
     force_verify: bool = False  # verify every pair, whatever its score
+    default: bool = True  # part of the default --cases set
 
 
 CASES = [
     Case(
         "real-case-1",
         DEMO / "real-case-1",
-        [sys.executable, str(DEMO / "replay_case_1.py")],
+        [sys.executable, str(DEMO / "replay.py"), "--case", "real-case-1"],
         {frozenset({"pr-14-sync-fixes", "pr-17-deploy-review-findings"})},
     ),
     Case(
@@ -69,6 +74,13 @@ CASES = [
     # harmless pair (normally they never reach verify), none may confirm.
     Case("harmless-demo-forced-verify", DEMO / "harmless-demo",
          [sys.executable, str(DEMO / "make_harmless_repo.py")], set(), force_verify=True),
+    # Hall of Fame replays (docs/HALL_OF_FAME.md).
+    Case("kiss", DEMO / "kiss", [sys.executable, str(DEMO / "replay.py"), "--case", "kiss"],
+         {frozenset({"pr-311-proven-batch-1", "pr-315-floor-dimensions"})}, default=False),
+    Case("elastic", DEMO / "elastic",
+         [sys.executable, str(DEMO / "replay.py"), "--case", "elastic"],
+         {frozenset({"pr-381-nested-agg-counter-ts", "pr-383-nested-legend-inner-group"})},
+         default=False),
 ]
 
 
@@ -186,9 +198,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--max-usd", type=float, default=1.0)
-    ap.add_argument("--cases", default=",".join(c.name for c in CASES))
+    ap.add_argument("--cases", default=",".join(c.name for c in CASES if c.default))
     ap.add_argument("--forced-runs", type=int, default=3,
                     help="runs for the forced-verify stress case (6 verifies per run)")
+    ap.add_argument("--force-verify", action="store_true",
+                    help="diagnostic: verify every pair of the selected cases, whatever its "
+                         "score (results are saved as <case>-forced-runN.json)")
     ap.add_argument("--summarize", nargs="+", type=Path, metavar="DIR",
                     help="no live calls: rebuild the table from saved eval dirs")
     args = ap.parse_args()
@@ -210,12 +225,14 @@ def main() -> int:
         branches = git_service.list_branches(case.repo, exclude="main")
         target = Row(f"{case.name} (expected confirmed)")
         harmless = Row(f"{case.name} (harmless pairs)")
-        if case.force_verify:
+        forced = case.force_verify or args.force_verify
+        if forced:
             verifier.is_high_risk = lambda _pair: True
             settings.verify_max_pairs = 100
         else:
             verifier.is_high_risk = _is_high_risk
             settings.verify_max_pairs = _max_pairs
+        stem = f"{case.name}-forced" if args.force_verify and not case.force_verify else case.name
         for i in range(1, (args.forced_runs if case.force_verify else args.runs) + 1):
             if spent >= args.max_usd:
                 stopped = f"budget reached (${spent:.4f} >= ${args.max_usd}) before {case.name} run {i}"
@@ -226,10 +243,10 @@ def main() -> int:
             elapsed = time.monotonic() - started
             usage = res.usage
             spent += usage.estimated_cost_usd if usage else 0.0
-            (out_dir / f"{case.name}-run{i}.json").write_text(res.model_dump_json(indent=2))
-            (out_dir / f"{case.name}-run{i}.meta.json").write_text(f'{{"elapsed_s": {elapsed:.3f}}}\n')
+            (out_dir / f"{stem}-run{i}.json").write_text(res.model_dump_json(indent=2))
+            (out_dir / f"{stem}-run{i}.meta.json").write_text(f'{{"elapsed_s": {elapsed:.3f}}}\n')
             line = _record(case, res, elapsed, target, harmless)
-            print(f"[{case.name} run {i}] {elapsed:.1f}s "
+            print(f"[{stem} run {i}] {elapsed:.1f}s "
                   f"${usage.estimated_cost_usd if usage else 0.0:.4f} | {line}", flush=True)
         rows += _finish(target, harmless)
         if stopped:
