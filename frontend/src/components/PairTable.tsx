@@ -134,6 +134,19 @@ export const PairTable = ({ pairs, risk_model }: PairTableProps) => {
                     ) : (
                       pair.rationale
                     )}
+                    {pair.static_breaks && pair.static_breaks.length > 0 && (
+                      <ul className="static-breaks" aria-label="Static signature check">
+                        {pair.static_breaks.map((line) => (
+                          <li key={line}>Static check: {line}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {pair.unsupported_claims && pair.unsupported_claims.length > 0 && (
+                      <div className="unsupported-claims">
+                        Not supported by the static checks:{' '}
+                        {pair.unsupported_claims.join(' ')}
+                      </div>
+                    )}
                     {pair.verification && (
                       <VerificationDetails verification={pair.verification} />
                     )}

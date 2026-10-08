@@ -57,6 +57,9 @@ export interface PairRisk {
   symbol_overlap?: string[];
   symbol_evidence?: string[];
   prefilter_candidate?: boolean;
+  static_breaks?: string[];
+  static_compatible?: string[];
+  unsupported_claims?: string[];
   model_cached?: boolean;
   prompt_tokens?: number;
   completion_tokens?: number;

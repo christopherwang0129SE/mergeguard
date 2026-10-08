@@ -452,3 +452,17 @@ main.container > * + * {
   color: #991b1b;
   white-space: nowrap;
 }
+
+.static-breaks {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  font-size: 12px;
+  color: var(--danger, #b42318);
+}
+
+.unsupported-claims {
+  margin-top: 6px;
+  font-size: 12px;
+  font-style: italic;
+  opacity: 0.75;
+}

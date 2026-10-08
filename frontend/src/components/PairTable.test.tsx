@@ -180,6 +180,25 @@ describe('PairTable', () => {
     expect(row!.classList.contains('row-hidden-conflict')).toBe(true);
   });
 
+  it('shows static call-site breaks and flags unsupported rationale claims', () => {
+    const pairs = [
+      pair('a', 'b', 80, 'high', {
+        score_source: 'model',
+        model_score: 80,
+        model_level: 'high',
+        static_breaks: ['f: call site use.py:3 on b does not pass new required x'],
+        unsupported_claims: ['g() now needs y.'],
+      }),
+    ];
+    render(<PairTable pairs={pairs} risk_model="nemotron" />);
+    expect(
+      screen.getByText('Static check: f: call site use.py:3 on b does not pass new required x')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Not supported by the static checks: g() now needs y.')
+    ).toBeInTheDocument();
+  });
+
   it('does not show the hidden conflict chip when the model level does not exceed git', () => {
     const pairs = [
       pair('a', 'b', 50, 'medium', {
