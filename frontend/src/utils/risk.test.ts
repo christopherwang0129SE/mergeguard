@@ -8,6 +8,7 @@ import {
   gitLevelFromScore,
   isFloorRule,
   isHiddenConflict,
+  isDisagree,
   levelRank,
 } from './risk'
 import type { PairRisk, RiskLevel } from '../types'
@@ -161,6 +162,88 @@ describe('risk utils', () => {
     it('is false when the model level is missing', () => {
       expect(
         isHiddenConflict({
+          score_source: 'model',
+          model_level: null,
+          git_score: 10,
+        })
+      ).toBe(false)
+    })
+    it('is false for a none -> low move (model low is not medium/high)', () => {
+      expect(
+        isHiddenConflict({
+          score_source: 'model',
+          model_level: 'low',
+          git_score: 0,
+        })
+      ).toBe(false)
+    })
+    it('is true for a low -> medium move', () => {
+      expect(
+        isHiddenConflict({
+          score_source: 'model',
+          model_level: 'medium',
+          git_score: 10,
+        })
+      ).toBe(true)
+    })
+  })
+
+  describe('isDisagree', () => {
+    it('is false when the levels match', () => {
+      expect(
+        isDisagree({
+          score_source: 'model',
+          model_level: 'medium',
+          git_score: 50,
+        })
+      ).toBe(false)
+    })
+    it('is false for a none <-> low move (neither side is medium/high)', () => {
+      expect(
+        isDisagree({
+          score_source: 'model',
+          model_level: 'low',
+          git_score: 0,
+        })
+      ).toBe(false)
+      expect(
+        isDisagree({
+          score_source: 'model',
+          model_level: 'none',
+          git_score: 10,
+        })
+      ).toBe(false)
+    })
+    it('is true for a low -> medium move', () => {
+      expect(
+        isDisagree({
+          score_source: 'model',
+          model_level: 'medium',
+          git_score: 10,
+        })
+      ).toBe(true)
+    })
+    it('is true when git is high and the model is low (but not hidden)', () => {
+      const pair = {
+        score_source: 'model' as const,
+        model_level: 'low' as const,
+        git_score: 80,
+      }
+      expect(isDisagree(pair)).toBe(true)
+      expect(isHiddenConflict(pair)).toBe(false)
+    })
+    it('is false when the published score came from git', () => {
+      expect(
+        isDisagree({
+          score_source: 'git',
+          model_level: 'high',
+          git_score: 10,
+        })
+      ).toBe(false)
+    })
+    it('is false when the model level is missing', () => {
+      expect(
+        isDisagree({
           score_source: 'model',
           model_level: null,
           git_score: 10,

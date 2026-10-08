@@ -98,4 +98,33 @@ describe('SummaryBar', () => {
     render(<SummaryBar pairs={pairs} />)
     expect(screen.getByText('Git only: Nemotron unavailable')).toBeInTheDocument()
   })
+
+  it('counts only medium/high disagreements (demo: 1 hidden conflict, 2 none->low pairs)', () => {
+    const pairs = [
+      // The real hidden conflict: git low (10) -> model high (70).
+      pair('feat/discount-cap', 'feat/tax-before-discount', 40, 'medium', {
+        score_source: 'model',
+        git_score: 10,
+        model_score: 70,
+        model_level: 'high',
+      }),
+      // Harmless pairs: git none (0) -> model low (10). Not a disagreement.
+      pair('docs/readme', 'feat/tax-before-discount', 5, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 10,
+        model_level: 'low',
+      }),
+      pair('docs/readme', 'feat/discount-cap', 2.5, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 5,
+        model_level: 'low',
+      }),
+    ]
+    render(<SummaryBar pairs={pairs} />)
+    expect(
+      screen.getByText('Nemotron disagrees on 1 pair(s)')
+    ).toBeInTheDocument()
+  })
 })

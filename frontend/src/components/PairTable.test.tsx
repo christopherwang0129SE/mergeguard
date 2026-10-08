@@ -195,6 +195,24 @@ describe('PairTable', () => {
     ).not.toBeInTheDocument();
   });
 
+  it('does not flag a none -> low pair as a hidden conflict', () => {
+    const pairs = [
+      pair('docs/readme', 'feat/tax-before-discount', 5, 'low', {
+        score_source: 'model',
+        git_score: 0,
+        model_score: 10,
+        model_level: 'low',
+        model_rationale: 'No conflicts expected.',
+      }),
+    ];
+    const { container } = render(<PairTable pairs={pairs} risk_model="nemotron" />);
+    expect(
+      screen.queryByText('Nemotron flags hidden conflict')
+    ).not.toBeInTheDocument();
+    const row = container.querySelector('tbody tr');
+    expect(row!.classList.contains('row-hidden-conflict')).toBe(false);
+  });
+
   it('shows an empty state when there are no pairs', () => {
     const { container } = render(<PairTable pairs={[]} risk_model={null} />);
     expect(screen.getByText(/no branch pairs/i)).toBeInTheDocument();
