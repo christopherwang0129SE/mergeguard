@@ -22,19 +22,23 @@ Cases we reproduced but MergeGuard did not confirm are listed under
 
 ## Results (current pipeline, 3 fresh runs each)
 
-Prompt version `risk-v8`; branch tests on. Raw results:
-`backend/.workspace/eval/20261008-191241/`.
+Branch tests on. The three Python cases were measured with prompt `risk-v8`
+(raw results `backend/.workspace/eval/20261008-191241/`); qwen-code was
+re-measured after JS/TS branch tests and the TypeScript prefilter landed,
+with prompt `risk-v9` (`backend/.workspace/eval/20261008-203026/`, JS
+dependency cache deleted first, so run 1 includes the npm install).
 
 | Case | Confirmed | Layer | Model score | Cost (3 runs) | Time per run |
 |---|---|---|---|---|---|
 | [daimon #14 x #17](#1-pymc-labsdaimon-a-new-required-field-vs-a-new-fixture) | **3/3** | branch test 3/3 and intent test 3/3 | 80, 85, 85 | $0.0405 | 113.8 s, 83.4 s, 85.9 s |
 | [KISS #311 x #315](#2-thinkersjournalkiss-read_floor-starts-returning-a-tuple) | **3/3** | branch test 3/3 (intent test: suspected 3/3) | 90, 90, 90 | $0.1009 | 97.4 s, 110.4 s, 120.1 s |
 | [elastic #381 x #383](#3-elasticobservability-migration-platform-a-third-query-stage-vs-a-two-stage-assertion) | **3/3** | branch test 3/3 (intent test never ran: score below 70) | 45, 30, 45 | $0.0033 | 17.3 s, 17.6 s, 17.4 s |
-| qwen-code #8947 x #8933 (TypeScript) | 0/3 | none: both layers are Python-only | 85, 85, 85 | $0.0056 | 9.1 s, 9.5 s, 8.3 s |
+| [qwen-code #8947 x #8933](#4-qwenlmqwen-code-historypagesize-now-needs-historyreplay-response) (TypeScript) | **3/3** | branch test 3/3 (intent test: Python-only, skipped) | 88, 55, 45 | $0.0055 | 253.2 s (incl. npm install 29.3 s and builds 89.0 s), 136.3 s, 136.0 s |
 
 The cost is the Nemotron triage plus intent tests; the branch-test stage
 itself makes no LLM call. It took 33.5-33.6 s per run on daimon, 22.7-22.8 s
-on KISS and 12.9 s on elastic, all included in the times above.
+on KISS, 12.9 s on elastic and 235.5 s / 115.8 s / 115.3 s on qwen-code (cold /
+warm dependency and build cache), all included in the times above.
 
 Every replay (`python3 demo/replay.py --case NAME --prove`) checks, and printed
 on our runs:
@@ -204,14 +208,65 @@ model scored 45 (five runs) and 20 (one run), so verify never ran ($0.0075 for
 6 runs). A diagnostic run with verify forced gave suspected 3/3 ($0.1563):
 no generated intent test recreated the break.
 
+## 4. QwenLM/qwen-code: `historyPageSize` now needs `historyReplay: 'response'`
+
+| | |
+|---|---|
+| Repo | [QwenLM/qwen-code](https://github.com/QwenLM/qwen-code) (TypeScript, npm workspaces, vitest) |
+| PR A | [#8947](https://github.com/QwenLM/qwen-code/pull/8947) — merged 2026-08-12 06:15:47 |
+| PR B | [#8933](https://github.com/QwenLM/qwen-code/pull/8933) — merged 2026-08-11 19:21:04 |
+| Fix | `ec3b2cbb` via #8984, merged 2026-08-12 08:39:34 |
+| Replay | `python3 demo/replay.py --case qwen-code --prove` (npm ci + core build + vitest) |
+
+**What broke.** #8933 changed `restoreSession`, a function nested inside the
+~8,800-line `createAcpSessionBridge` factory in
+`packages/acp-bridge/src/bridge.ts`, so that `historyPageSize` only takes
+effect when `historyReplay === 'response'`. #8947 added the test "transport
+failure marks the channel dying before process exit" to
+`packages/acp-bridge/src/bridge.test.ts`; it calls `bridge.loadSession({...,
+historyPageSize: 10})` without `historyReplay`. The merge is clean and the
+test fails on A+B. The fix adds `historyReplay: 'response'` to the test.
+Replay (Linux): `bridge.test.ts` has 544 / 557 / 553 passing tests on base /
+#8947 / #8933; A+B fails that test; the fix passes all 566.
+
+**MergeGuard now: confirmed 3/3, by the branch test only.**
+
+- Branch test (3/3): `bridge.test.ts` (changed by both PRs)
+  `createAcpSessionBridge > transport failure marks the channel dying before
+  process exit` passes on #8947 and fails on the merge, twice, with
+  `AssertionError: expected [] to deep equally contain ObjectContaining{…}`.
+  It does not exist on the merge-base (544 passed there). vitest on
+  `packages/acp-bridge`: 553 passed on #8933, 631 on #8947 (3 files), 639
+  passed and 1 failed on A+B. `packages/webui` (304 on A+B) and the root
+  package were also run; 4 more packages with changed test files were not
+  (cap 3 per pair).
+- Setup: one `npm ci --ignore-scripts` into the shared cache (29.3 s, run 1
+  only) and three workspace builds the tests import (`packages/core`,
+  `packages/acp-bridge`, `packages/sdk-typescript`: 89.0 s in run 1, restored
+  from the cache in runs 2 and 3). macOS `sandbox-exec`, localhost only.
+- Prefilter: the top evidence is now `loadSession: changed by #8933
+  (bridge.ts) via restoreSession, called by #8947 (bridge.test.ts)`, with a
+  snippet showing the wrapper, the `historyPageSize` /
+  `historyReplay === 'response'` change and the new call site. Before, the
+  regex fallback named `Harness`, `deferred` and `resolve`.
+- Model: 88, 55, 45. Every rationale names `restoreSession` and
+  `historyPageSize`, but none states the actual break; runs 2 and 3 call the
+  changes "compatible". The published score is 90 in all three runs because
+  the branch test confirmed.
+- Intent test: skipped ("no Python changes on either branch"); generated
+  intent tests are still pytest only.
+- Cost $0.0015, $0.0020, $0.0020 (the model triage only).
+
+**Earlier (Python-only branch tests, `risk-v8`): not confirmed, 0/3** (model
+85 in 3/3 runs, $0.0056). The branch-test stage reported "unsupported".
+
 ## Investigated, not confirmed
 
 | Case | Reproduced? | Why it is not in the Hall of Fame |
 |---|---|---|
-| QwenLM/qwen-code [#8947](https://github.com/QwenLM/qwen-code/pull/8947) x [#8933](https://github.com/QwenLM/qwen-code/pull/8933) (TypeScript; merged 2026-08-12 06:15:47 / 2026-08-11 19:21:04; fix `ec3b2cbb` via #8984 at 2026-08-12 08:39:34). Replay: `python3 demo/replay.py --case qwen-code --prove` (npm ci + core build + vitest) | Yes, on Linux: `bridge.test.ts` has 544 / 557 / 553 passing tests on base / A / B; the merge is clean; A+B fails "transport failure marks the channel dying before process exit"; the fix passes all 566 | Both confirmation layers are Python-only. The branch-test stage reports "unsupported" (17 changed `.test.ts` files; running vitest per worktree would need `node_modules` and a build in each one) and the intent test is skipped ("no Python changes on either branch"). Current pipeline: model 85 in 3/3 runs, $0.0056. Earlier: 85 in 3/3 runs ($0.0043), but for the wrong reason: it predicted a textual conflict in an integration-test harness and did not name the real cause (`historyPageSize` only takes effect with `historyReplay: 'response'` since #8933). |
-| pnpm/pnpm (fix `6a590dea`, TS2741 in `createDeployFiles.test.ts`) | Not attempted | TypeScript compile error; both confirmation layers are Python-only. |
-| votingworks/vxsuite #9264 x #9232 (fix `e1bbf43f`) | Not attempted | TypeScript monorepo; both confirmation layers are Python-only. |
-| misofm/engine #1024 x #1042 (fix `5651861f`) | Not attempted | Rust; both confirmation layers are Python-only. |
+| pnpm/pnpm (fix `6a590dea`, TS2741 in `createDeployFiles.test.ts`) | Not attempted | The fix commit does not name the two PRs, and the break is a type error (TS2741, `pnpm run compile-only`); the package's test script first compiles the pnpm CLI (`pn compile && pn --filter=pnpm compile`) and runs jest with `--experimental-vm-modules`. The branch-test stage does not type-check, does not run a package's `test` script and sets its own `NODE_OPTIONS`, so it would not see this break. |
+| votingworks/vxsuite #9264 x #9232 (fix `e1bbf43f`) | Not attempted | Checked the setup only: `apps/admin/backend` depends on 15 workspace libraries (each needs a build) and on `@votingworks/db`, which uses the native `better-sqlite3`; with install scripts disabled (our rule) its binding is never built, so the tests cannot run on any side. The repo pins Node 24.19 and is 2.7 GB. |
+| misofm/engine #1024 x #1042 (fix `5651861f`) | Not attempted | Rust; neither layer runs Rust tests (branch tests: pytest, vitest, jest; intent tests: pytest). |
 | huglabs/brainskit (fix `239523e`, "test: test_filelock imports the harness first") | No | Merging the two sides gives a textual conflict in `tests/test_onboarding.py`, so it is not a clean semantic case. |
 | EarthSciML/EarthSciAST (fix `1ea18ee1`, module rename `pde_inline_tests` -> `inline_tests`) | No | Merging the branch with main or with #210's head gives textual conflicts in `problem.py` and a Rust test. |
 | jackmcarthur/lorrax (fix `1e97e02a`) | No | Not from two PRs: a rebased branch. It also has no license and heavy JAX/h5py dependencies. |
@@ -236,8 +291,16 @@ no generated intent test recreated the break.
   values and behaviour were not checked (prompt `risk-v8`).
 - **The model is not deterministic at temperature 0.** The same 2,368-token
   KISS prompt scored 0, 0, 0 and later 95, 85, 85 (`risk-v7`).
-- **Both confirmation layers are Python-only.** Most 2026 public examples we
-  found are in TypeScript or Rust.
+- **The branch-test layer now runs vitest and jest; the intent-test layer is
+  still Python-only.** qwen-code went from 0/3 to 3/3 once its own vitest
+  file ran on A+B. The cost is time, not money: a one-time npm install
+  (29.3 s) and three workspace builds (89.0 s) on the first run, about 115 s
+  per run after that. Repos whose tests need native modules built by install
+  scripts (vxsuite) or a type check (pnpm) are out of reach.
+- **The TypeScript prefilter now names the right symbol, the model still
+  misjudges it.** With the evidence pointing at `loadSession` via
+  `restoreSession`, the model scored qwen-code 88, 55 and 45 and called the
+  changes compatible twice. The deterministic layer carries the case.
 - **No false confirmations from the branch-test layer** on the harmless
   fixtures, including a stress run that forced it on every pair (see the
   README's reliability table).
