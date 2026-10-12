@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.config import settings
 from app.schemas import AnalyzeRequest, AnalyzeResponse
-from app.services import git_service, sentinel
+from app.services import git_service, sentinel, verifier
 
 router = APIRouter()
 
@@ -18,6 +18,11 @@ def health() -> dict:
     return {
         "status": "ok",
         "nebius_ready": settings.nebius_ready,
+        "nebius_enabled": settings.nebius_enabled,
+        "nebius_model": settings.nebius_model,
+        "model": settings.nebius_model,
+        "provider": settings.nebius_provider,
+        "base_url": settings.nebius_base_url,
         "tavily_ready": settings.tavily_ready,
     }
 
@@ -52,6 +57,15 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         raise HTTPException(400, f"No branches to analyze (base={base}).")
 
     try:
-        return sentinel.analyze(repo, base, branches)
+        return sentinel.analyze(
+            repo,
+            base,
+            branches,
+            use_cache=req.use_cache,
+            verify=req.verify,
+            # Generated tests only ever run on local repos under the allowed
+            # roots (default: the bundled demo/), never on URL clones.
+            verify_allowed=bool(req.repo_path) and verifier.repo_allowed(repo),
+        )
     except git_service.GitError as e:
         raise HTTPException(400, str(e)) from e

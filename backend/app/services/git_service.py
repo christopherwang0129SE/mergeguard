@@ -116,3 +116,68 @@ def diff_against_base(repo: Path, branch: str, base: str) -> BranchDiff:
             )
         )
     return BranchDiff(branch=branch, base=base, merge_base=mb, ahead=ahead, files=files)
+
+
+def show_file(repo: Path, ref: str, path: str) -> str | None:
+    """Content of ``path`` at ``ref``, or ``None`` if it does not exist there."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{ref}:{path}"],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.decode("utf-8", errors="replace")
+
+
+def rev_parse(repo: Path, ref: str) -> str:
+    return _run(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").strip()
+
+
+def commit_messages(repo: Path, base: str, branch: str, limit: int = 5) -> str:
+    """Full messages (subject + body) of the commits on ``branch`` since ``base``."""
+    mb = merge_base(repo, base, branch)
+    ref = f"{mb}..{branch}" if mb else branch
+    return _run(repo, "log", f"-n{max(1, limit)}", "--format=%s%n%n%b%n---", ref).strip()
+
+
+def recent_commit_subjects(repo: Path, branch: str, limit: int = 5) -> list[str]:
+    """Short ``hash subject`` lines for ``branch``, newest first."""
+    count = max(0, limit)
+    if count == 0:
+        return []
+    out = _run(repo, "log", f"-n{count}", "--format=%h %s", branch)
+    subjects: list[str] = []
+    for line in out.splitlines():
+        text = " ".join(line.split())
+        if not text:
+            continue
+        if len(text) > 120:
+            text = text[:117].rstrip() + "..."
+        subjects.append(text)
+    return subjects
+
+
+def trimmed_diff(
+    repo: Path,
+    branch: str,
+    base: str,
+    paths: list[str],
+    max_chars: int,
+    function_context: bool = False,
+) -> str:
+    """Unified diff excerpt for ``paths`` on ``branch`` vs the merge-base with ``base``.
+
+    With ``function_context=True`` the diff is built with ``git diff -W``
+    (``--function-context``): each hunk is wrapped in the whole enclosing
+    function, so the model sees the unchanged context around the changed
+    lines. Without it, a plain ``-U1`` unified diff is used.
+    """
+    if not paths or max_chars <= 0:
+        return ""
+    mb = merge_base(repo, base, branch)
+    ref = f"{mb}..{branch}" if mb else f"{base}..{branch}"
+    context_args = ["-W"] if function_context else ["-U1"]
+    text = _run(repo, "diff", "--no-color", *context_args, ref, "--", *paths)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n...(trimmed)\n"

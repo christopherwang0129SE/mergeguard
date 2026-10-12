@@ -1,0 +1,1118 @@
+"""Verify-by-test: turn a suspected semantic conflict into evidence.
+
+For a high-risk pair, Nemotron writes one small pytest module with
+``test_branch_a_*`` tests (branch A's intent) and ``test_branch_b_*`` tests
+(branch B's intent). We then run it in throwaway git worktrees:
+
+- on branch A: ``-k branch_a`` must pass;
+- on branch B: ``-k branch_b`` must pass;
+- on the merge-base of A and B: all tests (to see which ones capture a
+  change rather than unchanged base behaviour);
+- on A merged with B (``git merge --no-commit`` in its own worktree): all
+  tests.
+
+``confirmed`` needs both own-branch runs to pass AND at least one intent test
+that passes on its branch, fails on the merge-base (so it captures that
+branch's change) and fails on the merge (assertion failure). A test that only
+pins unchanged base behaviour can never confirm, so a docs-only branch cannot
+"conflict" with a code change. Neither can a test that inspects code instead of
+running it (source text, code objects, signatures, hasattr/dir) or that passes
+only while the other branch's change is absent (catching ImportError /
+AttributeError): two harmless refactors "conflict" under such tests. Ran but missed that bar -> ``suspected``. Could not
+generate or run a usable test -> ``error``.
+
+Safety: only for local repos under the allowed roots (default: the bundled
+``demo/`` folder); never for repos cloned from a URL. The test subprocess gets
+a minimal environment (no API keys or other secrets), a timeout, and no
+network (macOS ``sandbox-exec`` deny-network profile when available, plus an
+in-process socket guard everywhere). Generated code that imports network,
+process or filesystem-mutation modules is rejected before it runs.
+"""
+from __future__ import annotations
+
+import ast
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from pathlib import Path
+
+from app.config import settings
+from app.schemas import PairRisk, Verification, VerifyRun
+from app.services import cache, git_service, nemotron, prefilter
+from app.services.nemotron import NemotronError
+from app.services.usage import UsageMeter
+
+PROMPT_VERSION = "verify-v8"
+TEST_FILENAME = "test_mergeguard_intent.py"
+MAX_OUTPUT_CHARS = 4000
+MAX_FILE_CHARS = 5000
+MAX_DIFF_CHARS = 3500
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+
+# Repo root of MergeGuard itself: backend/app/services/verifier.py -> parents[3].
+DEMO_ROOT = Path(__file__).resolve().parents[3] / "demo"
+
+_FORBIDDEN_MODULES = {
+    "socket", "subprocess", "requests", "urllib", "urllib2", "urllib3", "http",
+    "httpx", "aiohttp", "ftplib", "smtplib", "telnetlib", "ssl", "shutil",
+    "ctypes", "multiprocessing", "asyncio", "pty", "signal", "webbrowser",
+}
+_FORBIDDEN_CALLS = {"eval", "exec", "compile", "__import__", "open", "input", "breakpoint"}
+_FORBIDDEN_ATTRS = {"system", "popen", "spawnl", "spawnv", "execv", "execve", "fork", "remove",
+                    "unlink", "rmdir", "rmtree", "kill", "putenv", "environ", "getenv"}
+
+SYSTEM_PROMPT = (
+    "You write small, deterministic pytest tests that expose semantic merge "
+    "conflicts between two git branches, A and B. Each branch changes the code "
+    "with a specific intent. Write ONE self-contained pytest module that "
+    "captures BOTH intents:\n"
+    "- Functions named test_branch_a_<something> assert behaviour that branch A "
+    "intends. They must pass on branch A's code.\n"
+    "- Functions named test_branch_b_<something> assert behaviour that branch B "
+    "intends. They must pass on branch B's code.\n"
+    "Pick concrete inputs where the two changes interact, so that if both "
+    "branches are merged the combined code would violate at least one of these "
+    "intents. Do not only test helpers in isolation: call the shared entry "
+    "point that both changes affect (for example the function one branch edits "
+    "that calls the function the other branch edits), with inputs that trigger "
+    "BOTH changes at once (exceed any new cap, limit or threshold, and depend on "
+    "any new ordering). Compute every expected value by hand from THAT branch's code and "
+    "show the arithmetic in a short comment. Import project modules exactly like "
+    "the existing tests do; the repository root is on sys.path and the "
+    "project's own dependencies are installed. Besides the project, use only "
+    "the standard library and pytest. No network, no subprocess, no file or "
+    "environment access, no randomness, no sleeping. Define test functions at "
+    "module level (no classes). The same module runs on branch A, branch B, "
+    "their merge-base and their merge, so import anything that exists on only "
+    "one branch inside that branch's test functions, not at module level. "
+    "Test observable behaviour only: call the code and assert on return values or "
+    "raised errors. Never inspect source text, code objects, signatures or "
+    "attributes (no inspect, __code__, hasattr, dir), and never assert that the "
+    "other branch's change is absent: a test that fails only because the other "
+    "branch's code exists is not a conflict. If the two changes do not interact, "
+    "write honest tests that pass on the merge. "
+    "Reply with only the code in a single ```python block."
+)
+
+
+@dataclass
+class _Generated:
+    code: str
+    prompt_tokens: int
+    completion_tokens: int
+
+
+class VerifyError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Eligibility
+# ---------------------------------------------------------------------------
+
+
+def allowed_roots() -> list[Path]:
+    roots = [DEMO_ROOT]
+    for item in settings.verify_allowed_roots.split(os.pathsep):
+        if item.strip():
+            roots.append(Path(item.strip()).expanduser().resolve())
+    return roots
+
+
+def repo_allowed(repo: Path) -> bool:
+    resolved = repo.resolve()
+    return any(resolved == root or root in resolved.parents for root in allowed_roots())
+
+
+def is_high_risk(pair: PairRisk) -> bool:
+    """Worth a verify run. A call site the static check proves no longer
+    matches a changed signature always qualifies: the test is the ground
+    truth, not the model score."""
+    if pair.static_breaks:
+        return True
+    if pair.score_source != "model":
+        return False
+    if pair.level == "high" or pair.model_level == "high":
+        return True
+    best = max(pair.score, pair.model_score or 0.0)
+    return best >= settings.verify_min_score
+
+
+# ---------------------------------------------------------------------------
+# Prompt + code extraction / validation
+# ---------------------------------------------------------------------------
+
+
+def _clip(text: str, limit: int) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + "\n...(trimmed)"
+
+
+def _changed_py(repo: Path, base: str, branch: str) -> list[str]:
+    diff = git_service.diff_against_base(repo, branch, base)
+    return [f.path for f in diff.files if f.path.endswith(".py")]
+
+
+def _existing_test_example(repo: Path, base: str) -> str:
+    out = git_service._run(repo, "ls-tree", "-r", "--name-only", base)
+    for path in out.splitlines():
+        name = Path(path).name
+        if path.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py")):
+            text = git_service.show_file(repo, base, path) or ""
+            return f"# {path}\n{_clip(text, 2000)}"
+    return "(no existing tests)"
+
+
+_EVIDENCE_PATH = re.compile(r"\(([^()\s]+\.(?:py|[cm]?[jt]sx?))\)")
+
+
+def focus_paths(evidence: list[str] | tuple[str, ...]) -> list[str]:
+    """Files named in prefilter evidence (``f: changed by A (x.py), called by B (y.py)``)."""
+    out: list[str] = []
+    for line in evidence:
+        for path in _EVIDENCE_PATH.findall(line):
+            if path not in out:
+                out.append(path)
+    return out
+
+
+def _focused_diff(repo: Path, branch: str, base: str, paths: list[str], focus: list[str]) -> str:
+    """Diff with the files named by the prefilter first, so trimming keeps them."""
+    first = [p for p in paths if p in focus]
+    rest = [p for p in paths if p not in focus]
+    head = git_service.trimmed_diff(
+        repo, branch, base, first, max_chars=MAX_DIFF_CHARS, function_context=True
+    )
+    tail = git_service.trimmed_diff(
+        repo, branch, base, rest, max_chars=MAX_DIFF_CHARS - len(head), function_context=True
+    )
+    return (head + tail).strip()
+
+
+def build_test_prompt(
+    repo: Path,
+    base: str,
+    branch_a: str,
+    branch_b: str,
+    focus: list[str] | None = None,
+    evidence: list[str] | None = None,
+) -> str:
+    focus = focus or []
+    py_a = _changed_py(repo, base, branch_a)
+    py_b = _changed_py(repo, base, branch_b)
+    others = sorted({p for p in py_a + py_b if "test" not in Path(p).name} - set(focus))
+    source_files = [p for p in focus if p in py_a + py_b] + others
+    sections: list[str] = [
+        f"Base branch: {base}",
+        f"Branch A: {branch_a}",
+        f"Branch B: {branch_b}",
+        "",
+    ]
+    snippets = prefilter.evidence_snippets(repo, base, evidence or []) if evidence else ""
+    if snippets:
+        sections += [
+            "== Static analysis: a definition one branch changed and the other branch's "
+            "call site ==",
+            snippets,
+            "",
+        ]
+    hints = break_hints(repo, base, branch_a, branch_b, evidence or [])
+    if hints:
+        sections += ["== Exact static check: call sites that no longer match ==", *hints, ""]
+    for label, branch, paths in (("A", branch_a, py_a), ("B", branch_b, py_b)):
+        sections.append(f"== Branch {label} ({branch}) commit messages ==")
+        sections.append(_clip(git_service.commit_messages(repo, base, branch), 1500))
+        sections.append(f"== Branch {label} ({branch}) diff vs {base} (function context) ==")
+        diff = _focused_diff(repo, branch, base, paths, focus)
+        sections.append(diff or "(no Python changes)")
+        sections.append("")
+    for path in source_files[:3]:
+        for label, ref in (("base", base), ("A", branch_a), ("B", branch_b)):
+            text = git_service.show_file(repo, ref, path)
+            if text is not None:
+                sections.append(f"== {path} on {label} ({ref}) ==")
+                sections.append(_clip(text, MAX_FILE_CHARS))
+    sections.append("== Example of an existing test (import style) ==")
+    sections.append(_existing_test_example(repo, base))
+    return "\n".join(sections)
+
+
+def break_hints(
+    repo: Path, base: str, branch_a: str, branch_b: str, evidence: list[str]
+) -> list[str]:
+    """For each call site the static check proves broken: where the new code
+    path lives, so a test of the caller's intent can exercise it."""
+    out: list[str] = []
+    for check in prefilter.static_checks(repo, base, evidence):
+        if check.verdict != "breaks" or check.caller not in (branch_a, branch_b):
+            continue
+        label = "a" if check.caller == branch_a else "b"
+        where = f"{check.call_path}:{check.call_line}"
+        scope = f" inside {check.scope}()" if check.scope else ""
+        out.append(
+            f"- {check.label}. Branch {label.upper()} ({check.caller}) calls {check.name} at "
+            f"{where}{scope}. A test_branch_{label}_* that runs that code path (import it from "
+            f"{check.call_path}) passes on branch {label.upper()}, fails on the merge-base "
+            "(where that code does not exist yet) and fails on the merge."
+        )
+        if len(out) >= 3:
+            break
+    return out
+
+
+def sharpen_problem(runs: list[VerifyRun], hints: list[str],
+                    shape: dict[str, list[str]] | None = None) -> str:
+    """Feedback when every test passes on its branch but none confirms."""
+    by_target = {r.target: r for r in runs}
+    base = by_target.get("base")
+    pinned = []
+    for target in ("a", "b"):
+        own = by_target.get(target)
+        for name, outcome in sorted((own.cases if own else {}).items()):
+            if outcome == "passed" and base and base.cases.get(name) == "passed":
+                pinned.append(name)
+    text = (
+        "The previous test passes on each branch, but no test that captures a branch's "
+        "change (fails on the base) fails on the merge of A and B, so it does not exercise "
+        "the interaction. Choose inputs and the shared entry point so both changes take "
+        "effect together."
+    )
+    if pinned:
+        text += (
+            " These tests also pass on the merge-base, so they pin unchanged behaviour instead "
+            "of their branch's change: " + ", ".join(pinned) + "."
+        )
+    if shape:
+        text += (
+            " These tests do not count because they check code shape or absence instead of "
+            "behaviour: " + "; ".join(f"{n} ({', '.join(r)})" for n, r in sorted(shape.items()))
+            + ". Call the code and assert on its results; if the changes do not interact, "
+            "the honest tests pass on the merge."
+        )
+    if hints:
+        text += " Use the exact static check:\n" + "\n".join(hints)
+    return text
+
+
+def build_repair_prompt(original: str, code: str, failures: list[VerifyRun], problem: str) -> str:
+    lines = [original, "", "== Your previous test ==", "```python", code, "```", "", problem]
+    for run in failures:
+        lines.append(f"-- result on {run.target} ({run.ref}), -k {run.selection} --")
+        lines.append(_clip(run.output, 1500))
+    lines.append(
+        "Fix the test so every test_branch_a_* passes on branch A and every "
+        "test_branch_b_* passes on branch B. Recompute expected values from each "
+        "branch's own code. Reply with only the full corrected module in one "
+        "```python block."
+    )
+    return "\n".join(lines)
+
+
+def extract_code(text: str) -> str:
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    blocks = re.findall(r"```(?:python|py)?\s*\n(.*?)```", cleaned, flags=re.DOTALL)
+    if blocks:
+        return max(blocks, key=len).strip() + "\n"
+    return cleaned.strip() + "\n"
+
+
+def validate_code(code: str) -> str | None:
+    """Return a problem description, or ``None`` if the test may run."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        return f"generated test is not valid Python: {exc.msg} (line {exc.lineno})"
+    names = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if not any(n.startswith("test_branch_a") for n in names):
+        return "generated test has no module-level test_branch_a_* function"
+    if not any(n.startswith("test_branch_b") for n in names):
+        return "generated test has no module-level test_branch_b_* function"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in _FORBIDDEN_MODULES:
+                    return f"generated test imports forbidden module {alias.name}"
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and node.module.split(".")[0] in _FORBIDDEN_MODULES:
+                return f"generated test imports forbidden module {node.module}"
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in _FORBIDDEN_CALLS:
+                return f"generated test calls forbidden builtin {func.id}()"
+        if isinstance(node, ast.Attribute) and node.attr in _FORBIDDEN_ATTRS:
+            return f"generated test uses forbidden attribute .{node.attr}"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Sandboxed execution
+# ---------------------------------------------------------------------------
+
+_RUNNER = '''import os
+import socket
+import sys
+
+# The project venv installs the repo's own packages in editable mode, pointing
+# at the main checkout. Point those sys.path entries at this worktree instead,
+# so the code under test is the branch's code.
+_src = os.environ.get("MG_SRC_ROOT")
+_work = os.environ.get("MG_WORK_ROOT")
+if _src and _work:
+    _src = _src.rstrip("/") + "/"
+    _venv = os.path.realpath(sys.prefix).rstrip("/") + "/"  # the venv itself stays put
+    sys.path[:] = [
+        _work.rstrip("/") + "/" + p[len(_src):]
+        if (p + "/").startswith(_src) and not (os.path.realpath(p) + "/").startswith(_venv)
+        else p
+        for p in sys.path
+    ]
+
+# Repo test files run like `python -m pytest`: the checkout itself is importable
+# (and found before an editable-install finder that points at the main checkout).
+if os.environ.get("MG_CWD_ON_PATH"):
+    sys.path.insert(0, os.getcwd())
+
+
+def _no_network(*_args, **_kwargs):
+    raise OSError("network disabled by the MergeGuard verify sandbox")
+
+
+socket.socket.connect = _no_network
+socket.socket.connect_ex = _no_network
+socket.create_connection = _no_network
+socket.getaddrinfo = _no_network
+
+import pytest  # noqa: E402
+
+sys.exit(pytest.main(sys.argv[1:]))
+'''
+
+
+def sandbox_kind() -> str:
+    if sys.platform == "darwin" and os.path.exists(SANDBOX_EXEC):
+        return "sandbox-exec(deny network, writes only in tmp) + socket guard"
+    return "socket guard"
+
+
+def _sandbox_prefix(tmp_root: Path, loopback: bool = False) -> list[str]:
+    """``sandbox-exec`` on macOS: no network (``loopback``: except localhost),
+    writes only under ``tmp_root``. Elsewhere the socket guard does the job."""
+    if sys.platform == "darwin" and os.path.exists(SANDBOX_EXEC):
+        real = os.path.realpath(tmp_root)
+        local = ('(allow network* (local ip "localhost:*"))'
+                 '(allow network* (remote ip "localhost:*"))') if loopback else ""
+        profile = (
+            "(version 1)(allow default)(deny network*)" + local +
+            "(deny file-write*)"
+            f'(allow file-write* (subpath "{real}"))'
+            '(allow file-write* (subpath "/dev"))'
+        )
+        return [SANDBOX_EXEC, "-p", profile]
+    return []
+
+
+def project_python(repo: Path) -> str:
+    """Interpreter for the generated test.
+
+    A repo under the allowed roots may ship its own virtualenv (``.venv`` with
+    pytest installed, e.g. from ``uv sync``) so its dependencies are
+    importable; otherwise the backend's own interpreter is used.
+    """
+    venv = repo / ".venv"
+    python = venv / "bin" / "python"
+    if python.exists() and repo_allowed(repo) and any(venv.glob("lib/python3*/site-packages/pytest")):
+        return str(python)
+    return sys.executable
+
+
+def clean_env(home: Path, src_root: Path | None = None, work_root: Path | None = None) -> dict[str, str]:
+    """Minimal environment for the test subprocess. No secrets pass through."""
+    extra = {}
+    if src_root is not None and work_root is not None:
+        extra = {
+            "MG_SRC_ROOT": os.path.realpath(src_root),
+            "MG_WORK_ROOT": os.path.realpath(work_root),
+        }
+    return {
+        **extra,
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(home),
+        "TMPDIR": str(home),
+        "LANG": "en_US.UTF-8",
+        "LC_ALL": "en_US.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONHASHSEED": "0",
+        "NO_PROXY": "*",
+    }
+
+
+def _junit_cases(path: Path) -> dict[str, str]:
+    """Per test function outcome from a pytest junit XML report."""
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        return {}
+    cases: dict[str, str] = {}
+    for case in root.iter("testcase"):
+        name = case.get("name", "")
+        if not name:
+            continue
+        if case.find("failure") is not None:
+            cases[name] = "failed"
+        elif case.find("error") is not None:
+            cases[name] = "error"
+        elif case.find("skipped") is not None:
+            cases[name] = "skipped"
+        else:
+            cases[name] = "passed"
+    return cases
+
+
+def _junit_failure_lines(path: Path) -> dict[str, int]:
+    """Per failed test function: the line in the generated test module where
+    it failed (the outermost frame of that module in the traceback)."""
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        return {}
+    out: dict[str, int] = {}
+    pattern = re.compile(re.escape(TEST_FILENAME) + r":(\d+)")
+    for case in root.iter("testcase"):
+        failure = case.find("failure")
+        if failure is None or not case.get("name"):
+            continue
+        match = pattern.search((failure.text or "") + "\n" + (failure.get("message") or ""))
+        if match:
+            out[case.get("name", "")] = int(match.group(1))
+    return out
+
+
+def _junit_counts(path: Path) -> tuple[int, int, int]:
+    """(passed, failed, errors) from a pytest junit XML report."""
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        return (0, 0, 0)
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    tests = failures = errors = skipped = 0
+    for suite in suites:
+        tests += int(suite.get("tests", 0))
+        failures += int(suite.get("failures", 0))
+        errors += int(suite.get("errors", 0))
+        skipped += int(suite.get("skipped", 0))
+    return (max(tests - failures - errors - skipped, 0), failures, errors)
+
+
+def run_test(
+    workdir: Path,
+    tmp_root: Path,
+    *,
+    target: str,
+    ref: str,
+    selection: str,
+    timeout: float,
+    python: str | None = None,
+    src_root: Path | None = None,
+) -> VerifyRun:
+    """Run the generated test in ``workdir`` with ``-k selection``.
+
+    ``python`` is the interpreter to use (default: the backend's); with
+    ``src_root`` set, editable installs of ``src_root`` are redirected to
+    ``workdir``.
+    """
+    runner = tmp_root / "mg_runner.py"
+    if not runner.exists():
+        runner.write_text(_RUNNER, encoding="utf-8")
+    report = tmp_root / f"report-{target}.xml"
+    home = tmp_root / "home"
+    home.mkdir(exist_ok=True)
+    cmd = [
+        *_sandbox_prefix(tmp_root),
+        python or sys.executable,
+        "-I",
+        str(runner),
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--noconftest",
+        "-c",
+        os.devnull,
+        f"--rootdir={workdir}",
+        f"--junitxml={report}",
+        "-k",
+        selection,
+        str(workdir / TEST_FILENAME),
+    ]
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=workdir,
+        env=clean_env(home, src_root, workdir if src_root is not None else None),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        out = _kill_group(proc)
+    duration = round(time.monotonic() - started, 2)
+    text = (out or b"").decode("utf-8", errors="replace")
+    text = text.replace(os.path.realpath(tmp_root), "<tmp>").replace(str(tmp_root), "<tmp>")
+    text = re.sub(r"(?:\.\./)+<tmp>", "<tmp>", text)
+    passed, failed, errors = _junit_counts(report)
+    return VerifyRun(
+        target=target,  # type: ignore[arg-type]
+        ref=ref,
+        selection=selection,
+        exit_code=None if timed_out else proc.returncode,
+        passed=passed,
+        failed=failed,
+        errors=errors,
+        timed_out=timed_out,
+        duration_s=duration,
+        output=_clip(text, MAX_OUTPUT_CHARS),
+        cases=_junit_cases(report),
+        failure_lines=_junit_failure_lines(report),
+    )
+
+
+def _kill_group(proc: subprocess.Popen) -> bytes:
+    """Kill a timed-out test process and everything it started; return its output."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    out, _ = proc.communicate()
+    return out or b""
+
+
+def _collection_error(run: VerifyRun) -> bool:
+    return "ERROR collecting" in run.output or "error during collection" in run.output
+
+
+def _run_ok(run: VerifyRun) -> bool:
+    return (not run.timed_out) and run.exit_code == 0 and run.passed > 0 and run.failed == 0 and run.errors == 0
+
+
+STALE_WORKTREE_SECONDS = 30 * 60
+
+
+def cleanup_stale_worktrees(repo: Path, max_age_s: float = STALE_WORKTREE_SECONDS) -> int:
+    """Remove ``mg-verify-*`` worktrees left behind by a killed run.
+
+    Only touches worktrees this module created (temp dirs named
+    ``mg-verify-*``) that are older than ``max_age_s``, so concurrent runs are
+    never disturbed. Returns how many worktrees were removed.
+    """
+    try:
+        listing = git_service._run(repo, "worktree", "list", "--porcelain")
+    except git_service.GitError:
+        return 0
+    removed = 0
+    parents: set[Path] = set()
+    now = time.time()
+    for line in listing.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        path = Path(line[len("worktree "):])
+        if not path.parent.name.startswith("mg-verify-"):
+            continue
+        try:
+            age = now - path.parent.stat().st_mtime
+        except OSError:
+            age = max_age_s + 1  # directory is gone: always stale
+        if age <= max_age_s:
+            continue
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "remove", "--force", str(path)],
+            capture_output=True,
+        )
+        parents.add(path.parent)
+        removed += 1
+    for parent in parents:
+        # Our temp root holds only the worktrees plus runner/report files.
+        if parent.is_dir() and not any(p.is_dir() and (p / ".git").exists() for p in parent.iterdir()):
+            shutil.rmtree(parent, ignore_errors=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True)
+    return removed
+
+
+class _Worktrees:
+    """Throwaway worktrees for A, B and the merge of A+B. Always cleaned up."""
+
+    def __init__(self, repo: Path, sha_a: str, sha_b: str, sha_base: str) -> None:
+        self.repo = repo
+        self.sha_a = sha_a
+        self.sha_b = sha_b
+        self.sha_base = sha_base
+        self.tmp = Path(tempfile.mkdtemp(prefix="mg-verify-"))
+        self.paths: dict[str, Path] = {}
+        self.merge_conflict = False
+        self.merge_output = ""
+
+    def __enter__(self) -> "_Worktrees":
+        cleanup_stale_worktrees(self.repo)
+        try:
+            for name, sha in (
+                ("a", self.sha_a),
+                ("b", self.sha_b),
+                ("base", self.sha_base),
+                ("merge", self.sha_a),
+            ):
+                path = self.tmp / name
+                git_service._run(self.repo, "worktree", "add", "--detach", "--quiet", str(path), sha)
+                self.paths[name] = path
+            proc = subprocess.run(
+                [
+                    "git", "-C", str(self.paths["merge"]),
+                    "-c", "user.name=MergeGuard Verify", "-c", "user.email=verify@mergeguard.local",
+                    "merge", "--no-commit", "--no-ff", self.sha_b,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.merge_output = (proc.stdout + proc.stderr).strip()
+            self.merge_conflict = proc.returncode != 0
+        except Exception:
+            self.__exit__(None, None, None)
+            raise
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        for path in self.paths.values():
+            subprocess.run(
+                ["git", "-C", str(self.repo), "worktree", "remove", "--force", str(path)],
+                capture_output=True,
+            )
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "prune"], capture_output=True)
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+
+
+# Reasoning budget for test generation. If the model still runs out of tokens
+# while reasoning, the next attempt turns reasoning off (fast, and the repair
+# round feeds back real pytest output anyway).
+VERIFY_MAX_TOKENS = 16384
+NO_THINKING = {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def _generate(prompt: str, *, thinking: bool = True) -> _Generated:
+    reply = nemotron.complete(
+        prompt,
+        system_prompt=SYSTEM_PROMPT,
+        max_tokens=VERIFY_MAX_TOKENS,
+        timeout=settings.verify_llm_timeout_seconds,
+        extra_body=None if thinking else NO_THINKING,
+    )
+    prompt_tokens, completion_tokens = nemotron.usage_of(reply)
+    return _Generated(extract_code(reply), prompt_tokens, completion_tokens)
+
+
+_INTROSPECTION_MODULES = {"inspect", "dis", "ast", "tokenize", "linecache"}
+_INTROSPECTION_ATTRS = {
+    "__code__", "co_varnames", "co_names", "co_consts", "co_argcount", "co_code",
+    "__defaults__", "__kwdefaults__", "__signature__", "__annotations__", "__wrapped__",
+    "__dict__", "__closure__", "__globals__",
+}
+_INTROSPECTION_CALLS = {"hasattr", "dir", "vars"}
+_ABSENCE_ERRORS = {"ImportError", "ModuleNotFoundError", "AttributeError", "NameError"}
+_FAILING_CALLS = {"fail", "skip", "xfail", "importorskip"}
+
+
+def _exc_names(node: ast.expr | None) -> set[str]:
+    if node is None:
+        return set()
+    elts = node.elts if isinstance(node, ast.Tuple) else [node]
+    return {e.id if isinstance(e, ast.Name) else e.attr if isinstance(e, ast.Attribute) else ""
+            for e in elts}
+
+
+def _handler_tolerates(handler: ast.ExceptHandler) -> bool:
+    """True if this ``except ImportError`` (etc.) lets the test pass."""
+    for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+        if isinstance(node, (ast.Raise, ast.Assert)):
+            return False
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name in _FAILING_CALLS:
+                return False
+    return True
+
+
+def _flag_reason(node: ast.AST, aliases: set[str]) -> str | None:
+    if isinstance(node, ast.Name) and node.id in aliases:
+        return f"inspects code ({node.id})"
+    if isinstance(node, ast.Attribute) and node.attr in _INTROSPECTION_ATTRS:
+        return f"inspects code (.{node.attr})"
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in _INTROSPECTION_CALLS:
+            return f"checks attributes ({func.id}())"
+        if isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) == 3:
+            return "checks attributes (getattr with default)"
+        if (isinstance(func, ast.Attribute) and func.attr == "raises"
+                and node.args and _exc_names(node.args[0]) & _ABSENCE_ERRORS):
+            return "expects a name to be missing (pytest.raises)"
+    if isinstance(node, ast.ExceptHandler):
+        hit = _exc_names(node.type) & _ABSENCE_ERRORS
+        if hit and _handler_tolerates(node):
+            return "passes when a name is missing (except " + "/".join(sorted(hit)) + ")"
+    return None
+
+
+def _introspection_aliases(nodes) -> set[str]:
+    aliases: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            aliases |= {(a.asname or a.name).split(".")[0] for a in node.names
+                        if a.name.split(".")[0] in _INTROSPECTION_MODULES}
+        elif (isinstance(node, ast.ImportFrom)
+              and (node.module or "").split(".")[0] in _INTROSPECTION_MODULES):
+            aliases |= {a.asname or a.name for a in node.names}
+    return aliases
+
+
+_SIMPLE_STMTS = (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Expr, ast.Assert,
+                 ast.Return, ast.Raise)
+
+
+def shape_lines(code: str) -> dict[str, set[int]]:
+    """Per flagged test function: the lines whose failure says nothing about
+    behaviour (statements that inspect code or check absence, statements that
+    use a value derived from such an inspection, whole ``try``/``with`` blocks
+    that tolerate or expect a missing name)."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+    module_aliases = _introspection_aliases(tree.body)
+    out: dict[str, set[int]] = {}
+    for fn in tree.body:
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or not fn.name.startswith("test_"):
+            continue
+        aliases = module_aliases | _introspection_aliases(ast.walk(fn))
+        lines: set[int] = set()
+        tainted: set[str] = set()
+
+        def span(n: ast.AST) -> range:
+            return range(n.lineno, (getattr(n, "end_lineno", None) or n.lineno) + 1)
+
+        for _ in range(2):  # second pass picks up names tainted later in the function
+            for st in sorted((n for n in ast.walk(fn) if isinstance(n, ast.stmt) and n is not fn),
+                             key=lambda n: n.lineno):
+                if isinstance(st, ast.Try) and any(_flag_reason(h, aliases) for h in st.handlers):
+                    lines.update(span(st))
+                elif isinstance(st, (ast.With, ast.AsyncWith)) and any(
+                        _flag_reason(sub, aliases) for item in st.items
+                        for sub in ast.walk(item.context_expr)):
+                    lines.update(span(st))
+                elif isinstance(st, _SIMPLE_STMTS):
+                    subs = list(ast.walk(st))
+                    if any(_flag_reason(n, aliases) for n in subs) or any(
+                            isinstance(n, ast.Name) and n.id in tainted
+                            and isinstance(n.ctx, ast.Load) for n in subs):
+                        lines.update(span(st))
+                        targets = st.targets if isinstance(st, ast.Assign) else (
+                            [st.target] if isinstance(st, (ast.AnnAssign, ast.AugAssign)) else [])
+                        for t in targets:
+                            tainted |= {n.id for n in ast.walk(t) if isinstance(n, ast.Name)}
+                elif isinstance(st, (ast.If, ast.While)) and any(
+                        _flag_reason(n, aliases) for n in ast.walk(st.test)):
+                    lines.update(span(st.test))
+        if lines:
+            out[fn.name] = lines
+    return out
+
+
+def behaviour_problems(code: str) -> dict[str, list[str]]:
+    """Test functions that check code shape or absence instead of behaviour.
+
+    Such a test can "capture" a harmless refactor (``'half' in
+    perimeter.__code__.co_varnames``) or fail just because the other branch's
+    code exists (``from report import summary`` expected to raise). A failure
+    on one of its ``shape_lines`` is never evidence of a semantic conflict.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+    module_aliases = _introspection_aliases(tree.body)
+    out: dict[str, list[str]] = {}
+    for fn in tree.body:
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or not fn.name.startswith("test_"):
+            continue
+        aliases = module_aliases | _introspection_aliases(ast.walk(fn))
+        found = {r for n in ast.walk(fn) if (r := _flag_reason(n, aliases))}
+        if found:
+            out[fn.name] = sorted(found)
+    return out
+
+
+def confirming_tests(runs: list[VerifyRun], code: str | None = None) -> list[str]:
+    """Intent tests that pass on their branch, fail on the base and fail on the
+    merge, and test behaviour (see ``behaviour_problems``)."""
+    by_target = {r.target: r for r in runs}
+    a, b, base, merge = (by_target.get(k) for k in ("a", "b", "base", "merge"))
+    if not (a and b and base and merge) or merge.timed_out:
+        return []
+    shape = shape_lines(code) if code else {}
+    out: list[str] = []
+    for name, outcome in sorted(merge.cases.items()):
+        if outcome != "failed":
+            continue
+        own = a if name.startswith("test_branch_a") else b if name.startswith("test_branch_b") else None
+        if own is None or own.cases.get(name) != "passed":
+            continue
+        if base.cases.get(name) == "passed":
+            continue  # pins unchanged base behaviour; not evidence of a conflict
+        if name in shape and merge.failure_lines.get(name, 0) in shape[name] | {0}:
+            continue  # failed where it inspects code or expects absence, not on behaviour
+        out.append(name)
+    return out
+
+
+def _run_all(wt: "_Worktrees", pair: PairRisk, code: str) -> list[VerifyRun]:
+    """A's intent on A, B's on B, all on the merge-base and on the merge."""
+    timeout = settings.verify_timeout_seconds
+    python = project_python(wt.repo)
+    src_root = wt.repo if python != sys.executable else None
+    opts = {"timeout": timeout, "python": python, "src_root": src_root}
+    for name in ("a", "b", "base", "merge"):
+        (wt.paths[name] / TEST_FILENAME).write_text(code, encoding="utf-8")
+    runs = [
+        run_test(wt.paths["a"], wt.tmp, target="a", ref=pair.branch_a,
+                 selection="branch_a", **opts),
+        run_test(wt.paths["b"], wt.tmp, target="b", ref=pair.branch_b,
+                 selection="branch_b", **opts),
+        run_test(wt.paths["base"], wt.tmp, target="base", ref=f"merge-base {wt.sha_base[:7]}",
+                 selection="branch", **opts),
+    ]
+    if not wt.merge_conflict:
+        runs.append(
+            run_test(wt.paths["merge"], wt.tmp, target="merge",
+                     ref=f"{pair.branch_a}+{pair.branch_b}", selection="branch", **opts)
+        )
+    return runs
+
+
+def _artifact_dir(key: str) -> Path:
+    path = Path(settings.workspace_dir).resolve() / "verify" / key[:16]
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _cache_key(repo: Path, base: str, sha_a: str, sha_b: str) -> str:
+    return cache.cache_key(
+        base_sha=git_service.rev_parse(repo, base),
+        head_a=sha_a,
+        head_b=sha_b,
+        model=settings.nebius_model,
+        prompt_version=PROMPT_VERSION,
+    )
+
+
+def _load_cached_test(key: str) -> str | None:
+    path = Path(settings.workspace_dir).resolve() / "verify-cache" / f"{key}.py"
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+def _store_cached_test(key: str, code: str) -> None:
+    root = Path(settings.workspace_dir).resolve() / "verify-cache"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{key}.py").write_text(code, encoding="utf-8")
+
+
+def verify_pair(
+    repo: Path,
+    base: str,
+    pair: PairRisk,
+    *,
+    meter: UsageMeter | None = None,
+    use_cache: bool = True,
+) -> Verification:
+    meter = meter or UsageMeter()
+    started = time.monotonic()
+    tokens = [0, 0]
+
+    def finish(status: str, reason: str, **extra) -> Verification:
+        result = Verification(
+            status=status,  # type: ignore[arg-type]
+            reason=reason,
+            sandbox=sandbox_kind(),
+            duration_s=round(time.monotonic() - started, 2),
+            prompt_tokens=tokens[0],
+            completion_tokens=tokens[1],
+            **extra,
+        )
+        return result
+
+    try:
+        sha_a = git_service.rev_parse(repo, pair.branch_a)
+        sha_b = git_service.rev_parse(repo, pair.branch_b)
+        if not (_changed_py(repo, base, pair.branch_a) or _changed_py(repo, base, pair.branch_b)):
+            return finish("skipped", "no Python changes on either branch")
+        key = _cache_key(repo, base, sha_a, sha_b)
+        prompt = build_test_prompt(
+            repo, base, pair.branch_a, pair.branch_b,
+            focus=focus_paths(pair.symbol_evidence), evidence=pair.symbol_evidence,
+        )
+    except git_service.GitError as exc:
+        return finish("error", f"git: {exc}"[:300])
+
+    code: str | None = _load_cached_test(key) if use_cache else None
+    cached_test = code is not None
+    if cached_test:
+        meter.record_cache_hit()
+    attempts = 0
+    runs: list[VerifyRun] = []
+    last_code: str | None = None
+    thinking = True
+    max_attempts = max(1, int(settings.verify_max_attempts))
+
+    try:
+        hints = break_hints(repo, base, pair.branch_a, pair.branch_b, list(pair.symbol_evidence))
+    except git_service.GitError:
+        hints = []
+    try:
+        sha_base = git_service.merge_base(repo, sha_a, sha_b) or git_service.rev_parse(repo, base)
+        with _Worktrees(repo, sha_a, sha_b, sha_base) as wt:
+            next_prompt = prompt
+            while True:
+                if code is None:
+                    if attempts >= max_attempts:
+                        break
+                    attempts += 1
+                    try:
+                        gen = _generate(next_prompt, thinking=thinking)
+                    except NemotronError as exc:
+                        meter.record_call(exc.prompt_tokens, exc.completion_tokens)
+                        tokens[0] += exc.prompt_tokens
+                        tokens[1] += exc.completion_tokens
+                        if "finish_reason=length" in exc.detail:
+                            thinking = False  # reasoning ate the budget: answer directly
+                        if attempts < max_attempts:
+                            continue  # retry (without reasoning if it ran out of tokens)
+                        if last_code is None:
+                            return finish("error", f"model: {exc.detail or exc.code}",
+                                          attempts=attempts)
+                        break
+                    meter.record_call(gen.prompt_tokens, gen.completion_tokens)
+                    tokens[0] += gen.prompt_tokens
+                    tokens[1] += gen.completion_tokens
+                    code = gen.code
+                problem = validate_code(code)
+                if problem:
+                    if cached_test or attempts >= max_attempts:
+                        if last_code is not None:
+                            break  # keep the last test that did run
+                        return finish("error", problem, test_code=code, attempts=attempts,
+                                      cached_test=cached_test)
+                    next_prompt = build_repair_prompt(prompt, code, [], problem)
+                    code = None
+                    continue
+                runs = _run_all(wt, pair, code)
+                last_code = code
+                own_ok = _run_ok(runs[0]) and _run_ok(runs[1])
+                # A confirming test is evidence on its own: other generated tests
+                # that fail on their own branch are broken tests, not counter-evidence.
+                if confirming_tests(runs, code) or (own_ok and wt.merge_conflict) or cached_test:
+                    break
+                if attempts >= max_attempts:
+                    break
+                if not own_ok:
+                    failing = [r for r in runs[:2] if not _run_ok(r)]
+                    problem = "The previous test did not pass on its own branch."
+                    if any(_collection_error(r) for r in runs):
+                        problem += (
+                            " The module failed to import on at least one checkout: move "
+                            "imports of names that exist on only one branch into that "
+                            "branch's test functions."
+                        )
+                    next_prompt = build_repair_prompt(prompt, code, failing, problem)
+                else:
+                    next_prompt = build_repair_prompt(
+                        prompt, code, runs[2:],
+                        sharpen_problem(runs, hints, behaviour_problems(code)),
+                    )
+                code = None
+
+            code = last_code
+            if code is None:
+                return finish("error", "no usable test generated", attempts=attempts)
+            _store_cached_test(key, code)
+
+            own_ok = len(runs) >= 2 and _run_ok(runs[0]) and _run_ok(runs[1])
+            run_m = next((r for r in runs if r.target == "merge"), None)
+            confirming = confirming_tests(runs, code)
+            shape = set(behaviour_problems(code))
+            if confirming and run_m is not None and not run_m.timed_out:
+                status = "confirmed"
+                reason = (
+                    f"{len(confirming)} intent test(s) that pass on their own branch and "
+                    f"capture its change fail on the merge of A+B"
+                )
+                if not own_ok:
+                    discarded = sum(
+                        1 for r in runs[:2] for outcome in r.cases.values() if outcome != "passed"
+                    )
+                    reason += (
+                        f"; {discarded} generated test(s) that did not pass on their own "
+                        "branch were discarded"
+                    )
+            elif not own_ok:
+                bad = [r.target.upper() for r in runs[:2] if not _run_ok(r)]
+                status = "suspected"
+                reason = f"generated test does not pass on branch {' and '.join(bad)}"
+            elif wt.merge_conflict or run_m is None:
+                status, reason = "suspected", "textual merge conflict: git merge --no-commit failed"
+            elif run_m.timed_out:
+                status, reason = "error", "test timed out on the merge"
+            elif run_m.failed > 0 and any(
+                outcome == "failed" and name in shape for name, outcome in run_m.cases.items()
+            ):
+                status = "suspected"
+                reason = ("merge only fails tests that inspect code or expect the other "
+                          "branch's change to be absent, not behaviour: "
+                          + ", ".join(sorted(n for n, o in run_m.cases.items()
+                                             if o == "failed" and n in shape)))
+            elif run_m.failed > 0:
+                status = "suspected"
+                reason = "merge only fails tests that pin unchanged base behaviour"
+            elif run_m.errors > 0:
+                status, reason = "suspected", "test errored on the merge (not an assertion failure)"
+            else:
+                status, reason = "suspected", "generated test also passes on the merge"
+
+            art = _artifact_dir(key)
+            (art / TEST_FILENAME).write_text(code, encoding="utf-8")
+            result = finish(
+                status, reason, test_code=code, test_path=str(art / TEST_FILENAME), runs=runs,
+                attempts=attempts, cached_test=cached_test, merge_conflict=wt.merge_conflict,
+                confirming_tests=confirming,
+            )
+            (art / "result.json").write_text(
+                json.dumps(result.model_dump(), indent=2) + "\n", encoding="utf-8"
+            )
+            return result
+    except git_service.GitError as exc:
+        return finish("error", f"git: {exc}"[:300], attempts=attempts)
+    except OSError as exc:
+        return finish("error", f"runner: {exc}"[:300], attempts=attempts)

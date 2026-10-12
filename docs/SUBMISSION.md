@@ -33,7 +33,7 @@ That same signal doubles as a **review-prioritisation indicator**: the pull requ
 ## How we built it
 
 - **Backend — FastAPI.** The core **Sentinel** engine is dependency-free: it shells out to Git to compute merge-bases and per-branch diffs (`git diff -U0`), parses the changed line-ranges (hunks) per file, and scores every branch pair for region overlap using an **adjacency window** — because real Git conflicts come from *adjacent* edits, not just exact overlaps.
-- **Reasoning layer — Nebius Token Factory** (OpenAI-compatible API, model `Qwen/Qwen2.5-72B-Instruct`): explains *why* two branches collide in plain English, and powers the Merger agent's semantic merges.
+- **Reasoning layer — Nebius Token Factory** (OpenAI-compatible API, model `nvidia/nemotron-3-super-120b-a12b`, NVIDIA Nemotron 3 Super): explains *why* two branches collide in plain English, and powers the Merger agent's semantic merges.
 - **Correctness layer — Tavily:** the Merger agent's search engine. When a conflict touches a third-party library, Tavily pulls current docs so the merged code is correct against *today's* API — not just syntactically stitched together.
 - **Frontend — dashboard:** branch graph, conflict-risk heatmap, and each developer's live traffic light. _[confirm scope]_
 - **Validation:** an end-to-end test builds a throwaway repo with intentionally overlapping branches and asserts the Sentinel flags them and ranks the riskiest pair first.
@@ -90,7 +90,7 @@ A fleet of agents working one repo can then **self-coordinate**: each checks Mer
 
 ## How we meet the judging criteria
 
-- **Nebius Cloud + Token Factory** — LLM-powered conflict explanations and the Merger agent's semantic merges run on Nebius Token Factory (`Qwen/Qwen2.5-72B-Instruct`); the service can be hosted on Nebius Cloud. _[confirm hosting]_
+- **Nebius Cloud + Token Factory** — LLM-powered conflict explanations and the Merger agent's semantic merges run on Nebius Token Factory (`nvidia/nemotron-3-super-120b-a12b`); the service can be hosted on Nebius Cloud. _[confirm hosting]_
 - **Tavily as a search engine** — the Merger agent uses Tavily to fetch current library docs so merges stay correct against live APIs. At least one demo moment visibly triggers a Tavily search.
 
 ## Demo script (the money shot)
