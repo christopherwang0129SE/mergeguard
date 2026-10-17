@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AnalyzeRequest(BaseModel):
@@ -64,6 +64,43 @@ class AnalyzeResponse(BaseModel):
     branches: list[str]
     diffs: list[BranchDiff]
     pairs: list[PairRisk]
+
+
+class ResolveRequest(BaseModel):
+    """Propose a merge of committed source into target; never apply it in-place."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo_path: str = Field(min_length=1)
+    target_branch: str = Field(min_length=1)
+    source_branch: str = Field(min_length=1)
+    research_query: str | None = Field(None, max_length=500)
+    run_tests: bool = False
+
+
+class FileResolution(BaseModel):
+    path: str
+    status: Literal["resolved", "needs_review"]
+    explanation: str
+
+
+class ValidationResult(BaseModel):
+    name: str
+    status: Literal["passed", "failed", "skipped"]
+    output: str = ""
+
+
+class ResolveResponse(BaseModel):
+    target_branch: str
+    source_branch: str
+    target_commit: str
+    source_commit: str
+    status: Literal["clean", "proposed", "needs_review", "validation_failed"]
+    files: list[FileResolution]
+    patch: str | None = None
+    validations: list[ValidationResult]
+    research_sources: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class GitHubPullRequest(BaseModel):

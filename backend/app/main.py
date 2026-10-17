@@ -1,4 +1,4 @@
-"""MergeGuard Sentinel — FastAPI entrypoint."""
+"""MergeGuard — FastAPI entrypoint."""
 from __future__ import annotations
 
 from fastapi import FastAPI
@@ -7,9 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 
 app = FastAPI(
-    title="MergeGuard Sentinel",
+    title="MergeGuard",
     version="0.1.0",
-    description="Predicts merge-conflict risk across in-flight branches.",
+    description="Predicts merge-conflict risk and proposes reviewable merge resolutions.",
 )
 
 app.add_middleware(

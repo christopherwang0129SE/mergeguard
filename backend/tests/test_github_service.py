@@ -126,7 +126,7 @@ def test_fetches_and_diffs_github_pull_request_ref(tmp_path: Path) -> None:
     remote = tmp_path / "remote.git"
     source = tmp_path / "source"
     clone = tmp_path / "clone"
-    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    subprocess.run(["git", "init", "--bare", "-q", "-b", "main", str(remote)], check=True)
     source.mkdir()
     subprocess.run(["git", "-C", str(source), "init", "-q", "-b", "main"], check=True)
     subprocess.run(

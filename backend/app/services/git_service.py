@@ -5,6 +5,8 @@ import base64
 import os
 import re
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from app.schemas import BranchDiff, ChangedFile
@@ -157,3 +159,63 @@ def diff_against_base(repo: Path, branch: str, base: str) -> BranchDiff:
             )
         )
     return BranchDiff(branch=branch, base=base, merge_base=mb, ahead=ahead, files=files)
+
+
+def resolver_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Run proposal operations without hooks, rerere, or interactive prompts."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "-c", "core.hooksPath=", "-c",
+             "rerere.enabled=false", "-c", "core.autocrlf=false", "-c",
+             "user.name=MergeGuard", "-c", "user.email=mergeguard@localhost",
+             *args], capture_output=True, timeout=60,
+            env={**os.environ, "LC_ALL": "C", "GIT_TERMINAL_PROMPT": "0",
+                 "GIT_MERGE_AUTOEDIT": "no"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GitError("Git operation could not complete") from exc
+    if check and proc.returncode:
+        raise GitError(proc.stderr.decode("utf-8", errors="replace").strip())
+    return proc
+
+
+def resolve_commit(repo: Path, ref: str) -> str:
+    return resolver_git(repo, "rev-parse", "--verify", "--end-of-options",
+                        f"{ref}^{{commit}}").stdout.decode().strip()
+
+
+@contextmanager
+def merge_worktree(repo: Path, target: str):
+    """Only this disposable worktree's checkout/index is changed."""
+    with tempfile.TemporaryDirectory(prefix="mergeguard-") as temp:
+        worktree = Path(temp) / "checkout"
+        resolver_git(repo, "worktree", "add", "--detach", str(worktree), target)
+        try:
+            yield worktree
+        finally:
+            resolver_git(repo, "worktree", "remove", "--force", str(worktree))
+
+
+def conflict_entries(repo: Path) -> dict[str, dict[int, tuple[str, str]]]:
+    """Read NUL-separated stage entries, preserving spaces and unusual filenames."""
+    entries: dict[str, dict[int, tuple[str, str]]] = {}
+    for record in resolver_git(repo, "ls-files", "--unmerged", "-z").stdout.split(b"\0"):
+        if not record:
+            continue
+        metadata, path = record.split(b"\t", 1)
+        mode, oid, stage = metadata.decode("ascii").split()
+        entries.setdefault(path.decode("utf-8"), {})[int(stage)] = (mode, oid)
+    return entries
+
+
+def conflict_blob(repo: Path, oid: str, limit: int) -> str:
+    size = int(resolver_git(repo, "cat-file", "-s", oid).stdout)
+    if size > limit:
+        raise ValueError("File exceeds the configured context size limit")
+    raw = resolver_git(repo, "cat-file", "blob", oid).stdout
+    if b"\0" in raw:
+        raise ValueError("Binary files require human review")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Non-UTF-8 files require human review") from exc
