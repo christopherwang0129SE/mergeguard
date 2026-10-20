@@ -39,6 +39,12 @@ EXCERPT_CHARS = 300
 _STATUSES_FAILING = ("failed", "error")
 
 
+def _plural(count: int, singular: str, plural: str | None = None) -> str:
+    """``1 file``, ``0 files``, ``2 test files``. Only 1 is singular."""
+    word = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {word}"
+
+
 def is_python_test(path: str) -> bool:
     name = Path(path).name
     return name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
@@ -364,7 +370,9 @@ def check_pair(repo: Path, base: str, branch_a: str, branch_b: str) -> BranchTes
     info = {"files_a": py_a + js_a, "files_b": py_b + js_b, "unsupported_files": unsupported[:20]}
     if not (py_a or py_b or js_a or js_b):
         if unsupported:
-            return finish("unsupported", f"{js_reason} ({len(unsupported)} file(s))", **info)
+            return finish(
+                "unsupported", f"{js_reason} ({_plural(len(unsupported), 'file')})", **info
+            )
         return finish("skipped", "neither branch added or modified a test file", **info)
 
     timeout = float(settings.branch_tests_timeout_seconds)
@@ -389,9 +397,11 @@ def check_pair(repo: Path, base: str, branch_a: str, branch_b: str) -> BranchTes
                 if groups:
                     js_side = _JsSide(repo, groups, node or "", timeout, started)
             if not (py_a or py_b or js_a or js_b):
-                return finish("unsupported",
-                              f"no vitest/jest setup found for the {len(unsupported)} JS/TS "
-                              "test file(s)", **info)
+                return finish(
+                    "unsupported",
+                    f"no vitest/jest setup found for the {_plural(len(unsupported), 'JS/TS test file')}",
+                    **info,
+                )
             files_a, files_b = py_a + js_a, py_b + js_b
             union = sorted(set(files_a) | set(files_b))
 
@@ -434,7 +444,7 @@ def check_pair(repo: Path, base: str, branch_a: str, branch_b: str) -> BranchTes
         return finish("error", f"runner: {exc}"[:300], runs=runs, **info)
 
     if unsupported:
-        note += f"; {len(unsupported)} test file(s) not run"
+        note += f"; {_plural(len(unsupported), 'test file')} not run"
     confirming = [
         BranchTestFailure(
             test_id=test_id,

@@ -37,7 +37,7 @@ The process listens on `0.0.0.0` and `${PORT:-8000}`. Railway injects `PORT`.
 | --- | --- |
 | `NEBIUS_API_KEY` | Token Factory key. Empty keeps git-only scores. |
 | `TAVILY_API_KEY` | Tavily key. Empty skips library-doc lookup. The API demo is the one that searches. |
-| `DEMO_MODE` | `true`. Also the image default. `POST /api/analyze` then accepts only `/app/demo/checkout-demo` and `/app/demo/api-demo`. A `repo_url`, or any other path, returns 403 and is not cloned. |
+| `DEMO_MODE` | `true`. Also the image default. `POST /api/analyze`, `POST /api/analyze/stream`, and `POST /api/pair-diff` then accept only `/app/demo/checkout-demo` and `/app/demo/api-demo`. A `repo_url`, or any other path, returns 403 and is not cloned. |
 | `CORS_ALLOW_ORIGINS` | The Vercel origin, for example `https://mergeguard-demo.vercel.app`. Comma-separated if you have more than one. No trailing slash. |
 | `CORS_ALLOW_ORIGIN_REGEX` | Optional. Leave empty until you want preview deployments. Example: `https://mergeguard-demo.*\.vercel\.app`. The regex must match the whole origin. |
 | `VERIFY_ALLOWED_ROOTS` | Leave unset with this image. |

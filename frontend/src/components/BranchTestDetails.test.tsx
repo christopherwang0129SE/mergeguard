@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { BranchTestDetails } from './BranchTestDetails'
-import { PairList } from './PairList'
+import { pairVerdict } from '../utils/verdict'
 import { usageLine } from '../utils/usage'
 import { isConfirmedByBranchTest, isConfirmedByIntentTest, isConfirmedByTest } from '../utils/risk'
 import type { BranchTests, PairRisk, UsageSummary } from '../types'
@@ -47,14 +47,14 @@ const pair = (extra: Partial<PairRisk> = {}): PairRisk => ({
 
 describe('BranchTestDetails', () => {
   it('labels a branch-test confirmation separately from the intent test', () => {
-    render(<BranchTestDetails branchTests={branchTests()} />)
+    render(<BranchTestDetails branchTests={branchTests()} branchA="feat/tuple" branchB="feat/report" />)
     const badge = screen.getByText('Confirmed by branch test')
     expect(badge).toHaveAttribute('data-tone', 'fail')
     expect(screen.queryByText(/intent test/)).toBeNull()
   })
 
   it('shows the failing test id and the error excerpt as evidence', () => {
-    render(<BranchTestDetails branchTests={branchTests()} />)
+    render(<BranchTestDetails branchTests={branchTests()} branchA="feat/tuple" branchB="feat/report" />)
     expect(screen.getByText('tests.test_report::test_report_uses_floor')).toBeInTheDocument()
     const failures = screen.getByLabelText('Branch tests failing on merge')
     expect(failures).toHaveTextContent("feat/report's test")
@@ -64,7 +64,7 @@ describe('BranchTestDetails', () => {
   })
 
   it('keeps per-checkout runs collapsed until expanded', () => {
-    const { container } = render(<BranchTestDetails branchTests={branchTests()} />)
+    const { container } = render(<BranchTestDetails branchTests={branchTests()} branchA="feat/tuple" branchB="feat/report" />)
     const details = container.querySelector('details') as HTMLDetailsElement
     expect(details.open).toBe(false)
     expect(screen.getByText(/All runs/, { selector: 'summary' })).toHaveTextContent('All runs (3.2s)')
@@ -85,7 +85,7 @@ describe('BranchTestDetails', () => {
       install_s: 29.6,
       build_s: 41.7,
     })
-    render(<BranchTestDetails branchTests={js} />)
+    render(<BranchTestDetails branchTests={js} branchA="feat/tuple" branchB="feat/report" />)
     fireEvent.click(screen.getByText(/All runs/, { selector: 'summary' }))
     const items = screen.getAllByText('Merge A+B').map((el) => el.parentElement)
     expect(items[0]).toHaveTextContent('vitest in packages/bridge, 1 file): 565 passed, 1 failed')
@@ -96,31 +96,24 @@ describe('BranchTestDetails', () => {
   })
 
   it('shows a pass status when the branch tests pass on the merge', () => {
-    render(<BranchTestDetails branchTests={branchTests({ status: 'passed', confirming: [] })} />)
+    render(<BranchTestDetails branchTests={branchTests({ status: 'passed', confirming: [] })} branchA="feat/tuple" branchB="feat/report" />)
     expect(screen.getByText('Branch tests pass on merge')).toHaveAttribute('data-tone', 'pass')
     expect(screen.queryByLabelText('Branch tests failing on merge')).toBeNull()
   })
 
-  it('gives a branch-test-only pair the confirmed row edge', () => {
-    const { container } = render(
-      <PairList pairs={[pair({ branch_tests: branchTests() })]} />
-    )
-    expect(screen.getAllByTestId('branch-tests')).toHaveLength(1)
-    expect(screen.queryByTestId('verification')).toBeNull()
-    expect(container.querySelector('[data-testid="pair-card"]')!.classList.contains('pair-confirmed')).toBe(true)
+  it('makes a branch-test-only pair a confirmed pair', () => {
+    expect(pairVerdict(pair({ branch_tests: branchTests() }))).toBe('confirmed')
   })
 
-  it('does not give the confirmed edge for passed branch tests', () => {
-    const { container } = render(
-      <PairList
-        pairs={[pair({ score: 20, level: 'low', branch_tests: branchTests({ status: 'passed', confirming: [] }) })]}
-       
-      />
-    )
-    expect(container.querySelector('.pair-confirmed')).toBeNull()
-    // A tested low-risk pair stays a quiet row; its evidence sits in the details.
-    expect(screen.getByTestId('quiet-row')).toBeInTheDocument()
-    expect(screen.getByText('Branch tests pass on merge')).toBeInTheDocument()
+  it('does not confirm a pair whose branch tests pass on the merge', () => {
+    expect(pairVerdict(pair({ score: 20, level: 'low', branch_tests: branchTests({ status: 'passed', confirming: [] }) }))).toBe('clean')
+  })
+
+  it('shows the four checkouts as a truth table with the merge failing', () => {
+    render(<BranchTestDetails branchTests={branchTests()} branchA="feat/tuple" branchB="feat/report" />)
+    expect(screen.getByTestId('tt-merge')).toHaveAttribute('data-outcome', 'fail')
+    expect(screen.getByTestId('tt-a')).toHaveTextContent('feat/tuple')
+    expect(screen.getByTestId('tt-base')).toHaveTextContent('not run')
   })
 
   it('tells the two confirmation layers apart', () => {

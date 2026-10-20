@@ -265,3 +265,61 @@ class GitHubPullRequestSyncResponse(BaseModel):
     repository: str
     pull_requests: list[GitHubPullRequest]
     analysis: AnalyzeResponse
+
+
+FileStatus = Literal["modified", "added", "deleted", "unchanged"]
+DiffLineKind = Literal["context", "add", "del"]
+
+
+class PairDiffRequest(BaseModel):
+    """Both branches' diffs against the base, for the side-by-side view.
+
+    Repo resolution matches ``/api/analyze``: local path or git URL, including
+    a GitHub pull request URL.
+    """
+
+    repo_path: str | None = Field(None, description="Absolute path to a local git repo.")
+    repo_url: str | None = Field(None, description="Git URL to clone (https), or a GitHub PR URL.")
+    base_branch: str | None = Field(None, description="Integration branch (default: main).")
+    branch_a: str = Field(..., min_length=1)
+    branch_b: str = Field(..., min_length=1)
+    context: int = Field(3, ge=0, le=100, description="Unified-diff context lines.")
+
+
+class DiffLine(BaseModel):
+    kind: DiffLineKind
+    old_no: int | None = None
+    new_no: int | None = None
+    text: str
+
+
+class DiffHunk(BaseModel):
+    old_start: int
+    old_lines: int
+    new_start: int
+    new_lines: int
+    lines: list[DiffLine]
+
+
+class FileSide(BaseModel):
+    status: FileStatus
+    patch: str = ""
+    hunks: list[DiffHunk] = Field(default_factory=list)
+    truncated: bool = False
+
+
+class PairDiffFile(BaseModel):
+    path: str
+    shared: bool
+    overlapping: bool
+    a: FileSide
+    b: FileSide
+
+
+class PairDiffResponse(BaseModel):
+    base_branch: str
+    branch_a: str
+    branch_b: str
+    merge_base_a: str
+    merge_base_b: str
+    files: list[PairDiffFile]

@@ -14,12 +14,11 @@ export const DocsSources = ({ sources }: DocsSourcesProps) => {
   const usable = usableDocs(sources).slice(0, MAX_DOCS);
   if (usable.length === 0) return null;
   return (
-    <section className="fact" data-testid="docs-sources">
-      <h4 className="fact-label">
-        Library docs
-        <span className="fact-sub">found by Tavily</span>
-      </h4>
-      <div className="fact-body">
+    <section className="block" data-testid="docs-sources" aria-labelledby="docs-heading">
+      <h3 id="docs-heading" className="block-title">
+        Library docs <span className="block-sub">found by Tavily to ground Nemotron</span>
+      </h3>
+      <div className="block-body">
         <ul className="docs">
           {groupByQuery(usable).map((group) => (
             <li key={group.query} className="docs-group">

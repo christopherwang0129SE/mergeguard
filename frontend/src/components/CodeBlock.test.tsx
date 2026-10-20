@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import { CodeBlock } from './CodeBlock';
-import { ProofTable } from './ProofTable';
+import { TruthTable } from './TruthTable';
 import { DocsSources } from './DocsSources';
 
 describe('CodeBlock', () => {
@@ -35,33 +35,43 @@ describe('CodeBlock', () => {
   });
 });
 
-describe('ProofTable', () => {
+describe('TruthTable', () => {
   const run = (target: string, ref: string, passed: number, failed: number, extra = {}) => ({
     target, ref, passed, failed, errors: 0, timed_out: false, ...extra,
   });
+  const props = { branchA: 'feat/a', branchB: 'feat/b', label: 'Test results per checkout' };
 
-  it('shows A, B and the merge with their outcome, nothing else', () => {
+  it('lays the four checkouts out as base, B / A, merge', () => {
     render(
-      <ProofTable
+      <TruthTable
         runs={[run('base', 'merge-base', 0, 2), run('a', 'feat/a', 3, 0), run('b', 'feat/b', 2, 0), run('merge', 'a+b', 3, 2)]}
+        {...props}
       />
     );
-    const rows = within(screen.getByRole('table', { name: 'Test results per checkout' })).getAllByRole('row').slice(1);
-    expect(rows.map((r) => r.textContent)).toEqual(['Afeat/a3 passed', 'Bfeat/b2 passed', 'A+Bmerged2 failed, 3 passed']);
-    expect(rows.map((r) => r.getAttribute('data-outcome'))).toEqual(['pass', 'pass', 'fail']);
+    const table = screen.getByRole('table', { name: 'Test results per checkout' });
+    const rows = within(table).getAllByRole('row').slice(1);
+    expect(rows[0]).toHaveTextContent('without A' );
+    expect(within(rows[0]).getByTestId('tt-base')).toHaveAttribute('data-outcome', 'fail');
+    expect(within(rows[0]).getByTestId('tt-b')).toHaveTextContent('feat/bpass2 passed');
+    expect(within(rows[1]).getByTestId('tt-a')).toHaveTextContent('feat/apass3 passed');
+    expect(within(rows[1]).getByTestId('tt-merge')).toHaveTextContent('A + B mergedfail3 passed, 2 failed');
   });
 
-  it('reports a timeout and an empty run honestly', () => {
-    render(<ProofTable runs={[run('a', 'feat/a', 0, 0), run('merge', 'a+b', 0, 0, { timed_out: true })]} />);
-    const rows = screen.getAllByRole('row').slice(1);
-    expect(rows[0]).toHaveTextContent('no tests ran');
-    expect(rows[0]).toHaveAttribute('data-outcome', 'none');
-    expect(rows[1]).toHaveTextContent('timed out');
-    expect(rows[1]).toHaveAttribute('data-outcome', 'fail');
+  it('reports a timeout, an empty run and a missing run honestly', () => {
+    render(<TruthTable runs={[run('a', 'feat/a', 0, 0), run('merge', 'a+b', 0, 0, { timed_out: true })]} {...props} />);
+    expect(screen.getByTestId('tt-a')).toHaveAttribute('data-outcome', 'none');
+    expect(screen.getByTestId('tt-a')).toHaveTextContent('no tests ran');
+    expect(screen.getByTestId('tt-merge')).toHaveTextContent('timeout');
+    expect(screen.getByTestId('tt-b')).toHaveTextContent('not run');
   });
 
-  it('renders nothing without proof runs', () => {
-    const { container } = render(<ProofTable runs={[run('base', 'merge-base', 1, 0)]} />);
+  it('uses a merge rerun in place of the first merge run', () => {
+    render(<TruthTable runs={[run('merge', 'a+b', 3, 0), run('merge-rerun', 'a+b', 1, 2)]} {...props} />);
+    expect(screen.getByTestId('tt-merge')).toHaveAttribute('data-outcome', 'fail');
+  });
+
+  it('renders nothing without runs', () => {
+    const { container } = render(<TruthTable runs={[]} {...props} />);
     expect(container).toBeEmptyDOMElement();
   });
 });

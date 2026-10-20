@@ -203,3 +203,97 @@ export interface HealthResponse {
   base_url?: string | null;
   tavily_ready: boolean;
 }
+/* ---------- POST /api/analyze/stream (NDJSON, one event per line) ---------- */
+
+export type StageId = 'resolve' | 'diff' | 'prefilter' | 'model' | 'verify' | 'branch_tests';
+export type StageStatus = 'start' | 'done' | 'skipped';
+
+export interface StageEvent {
+  type: 'stage';
+  stage: StageId;
+  status: StageStatus;
+  label: string;
+  detail?: string | null;
+  t: number;
+}
+
+export interface BranchesEvent {
+  type: 'branches';
+  base_branch: string;
+  branches: string[];
+  t: number;
+}
+
+export interface PairEvent {
+  type: 'pair';
+  pair: PairRisk;
+  t: number;
+}
+
+export interface ResultEvent {
+  type: 'result';
+  result: AnalyzeResponse;
+  t: number;
+}
+
+export interface ErrorEvent {
+  type: 'error';
+  detail: string;
+  t: number;
+}
+
+export interface PingEvent {
+  type: 'ping';
+  t: number;
+}
+
+export type StreamEvent = StageEvent | BranchesEvent | PairEvent | ResultEvent | ErrorEvent | PingEvent;
+
+/* ---------- POST /api/pair-diff ---------- */
+
+export interface PairDiffRequest extends Omit<AnalyzeRequest, 'branches'> {
+  branch_a: string;
+  branch_b: string;
+  context?: number;
+}
+
+export interface DiffLine {
+  kind: 'context' | 'add' | 'del';
+  old_no: number | null;
+  new_no: number | null;
+  text: string;
+}
+
+export interface DiffHunk {
+  old_start: number;
+  old_lines: number;
+  new_start: number;
+  new_lines: number;
+  lines: DiffLine[];
+}
+
+export type FileChangeStatus = 'modified' | 'added' | 'deleted' | 'unchanged';
+
+export interface FileSide {
+  status: FileChangeStatus;
+  patch: string;
+  hunks: DiffHunk[];
+  truncated: boolean;
+}
+
+export interface PairDiffFile {
+  path: string;
+  shared: boolean;
+  overlapping: boolean;
+  a: FileSide;
+  b: FileSide;
+}
+
+export interface PairDiffResponse {
+  base_branch: string;
+  branch_a: string;
+  branch_b: string;
+  merge_base_a: string;
+  merge_base_b: string;
+  files: PairDiffFile[];
+}

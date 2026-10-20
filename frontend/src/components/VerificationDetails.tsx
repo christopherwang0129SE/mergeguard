@@ -1,11 +1,13 @@
 import type { Verification, VerifyRun } from '../types';
-import { confirmingRuns } from '../utils/verification';
 import { failureExcerpts } from '../utils/evidence';
 import { CodeBlock } from './CodeBlock';
-import { ProofTable } from './ProofTable';
+import { TruthTable } from './TruthTable';
+import { keptRuns } from '../utils/verification';
 
 interface VerificationDetailsProps {
   verification: Verification;
+  branchA: string;
+  branchB: string;
 }
 
 const STATUS: Record<Verification['status'], { label: string; tone: 'fail' | 'neutral' | 'warn' }> = {
@@ -37,7 +39,7 @@ const runSummary = (run: VerifyRun): string => {
  * pass/pass/fail proof, the assertion that failed on the merge, and the
  * generated test with the failing lines marked.
  */
-export const VerificationDetails = ({ verification }: VerificationDetailsProps) => {
+export const VerificationDetails = ({ verification, branchA, branchB }: VerificationDetailsProps) => {
   const status = STATUS[verification.status];
   const confirming = verification.confirming_tests ?? [];
   const merge = verification.runs.find((run) => run.target === 'merge');
@@ -50,20 +52,19 @@ export const VerificationDetails = ({ verification }: VerificationDetailsProps) 
   const fileName = verification.test_path?.split('/').pop();
 
   return (
-    <section className="fact" data-status={verification.status} data-testid="verification">
-      <h4 className="fact-label">
-        Intent tests
-        <span className="fact-sub">written by Nemotron</span>
-      </h4>
-      <div className="fact-body">
+    <section className="block" data-status={verification.status} data-testid="verification" aria-labelledby="verify-heading">
+      <h3 id="verify-heading" className="block-title">
+        Verify by test <span className="block-sub">Nemotron writes a test of each branch&apos;s intent</span>
+      </h3>
+      <div className="block-body">
         <p className="status-line">
           <span className="status" data-tone={status.tone}>
             {status.label}
           </span>
           {verification.status !== 'confirmed' && <span className="status-reason">{verification.reason}</span>}
         </p>
-        {verification.status === 'confirmed' && (
-          <ProofTable runs={confirmingRuns(verification)} label="Intent test results per checkout" />
+        {verification.runs.length > 0 && (
+          <TruthTable runs={keptRuns(verification)} branchA={branchA} branchB={branchB} label="Intent test results per checkout" />
         )}
         {confirming.length > 0 && (
           <p className="fails-on-merge" data-many={confirming.length > 1 || undefined}>
@@ -84,7 +85,7 @@ export const VerificationDetails = ({ verification }: VerificationDetailsProps) 
           />
         ))}
         {verification.test_code && (
-          <details className="more">
+          <details className="more" open={verification.status === 'confirmed' || undefined}>
             <summary>
               Generated test
               {fileName && (
@@ -93,12 +94,12 @@ export const VerificationDetails = ({ verification }: VerificationDetailsProps) 
                   <code>{fileName}</code>
                 </>
               )}{' '}
-              <span className="tabular">
-                (
-                {verification.cached_test
-                  ? 'cached'
-                  : `${verification.attempts} attempt${verification.attempts === 1 ? '' : 's'}`}
-                , {verification.duration_s.toFixed(1)}s)
+              <span className="summary-meta tabular">
+                {`(${
+                  verification.cached_test
+                    ? 'cached'
+                    : `${verification.attempts} attempt${verification.attempts === 1 ? '' : 's'}`
+                }, ${verification.duration_s.toFixed(1)}s)`}
               </span>
             </summary>
             <CodeBlock code={verification.test_code} label="Generated test code" numbered marked={failingLines} />

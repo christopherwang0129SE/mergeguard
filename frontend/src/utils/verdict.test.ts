@@ -173,3 +173,50 @@ describe('helpers', () => {
     expect(noTestsRan([pair()])).toBe(false);
   });
 });
+
+import { pairVerdict, rankPairs, summaryLine } from './verdict';
+
+describe('pairVerdict, rankPairs and summaryLine', () => {
+  const base = {
+    shared_files: 1,
+    overlapping_files: 0,
+    collisions: [],
+    rationale: '',
+    score_source: 'git' as const,
+  };
+  const confirmed = {
+    ...base,
+    branch_a: 'a',
+    branch_b: 'b',
+    score: 90,
+    level: 'high' as const,
+    branch_tests: { status: 'confirmed' } as never,
+  };
+  const suspected = { ...base, branch_a: 'a', branch_b: 'c', score: 55, level: 'medium' as const };
+  const clean = { ...base, branch_a: 'b', branch_b: 'c', score: 5, level: 'low' as const };
+  const capped = { ...clean, branch_a: 'c', branch_b: 'd', fallback_reason: 'pair_cap' as const };
+
+  it('names each pair in one word', () => {
+    expect([confirmed, suspected, clean, capped].map(pairVerdict)).toEqual(['confirmed', 'suspected', 'clean', 'skipped']);
+  });
+
+  it('ranks confirmed first, then by verdict and score', () => {
+    expect(rankPairs([clean, capped, suspected, confirmed]).map(pairVerdict)).toEqual([
+      'confirmed',
+      'suspected',
+      'skipped',
+      'clean',
+    ]);
+  });
+
+  it('writes the summary sentence', () => {
+    expect(summaryLine([confirmed, clean, capped])).toBe('1 of 3 branch pairs breaks when merged, confirmed by test.');
+    expect(summaryLine([confirmed, suspected])).toBe(
+      '1 of 2 branch pairs breaks when merged, confirmed by test. 1 more looks risky.'
+    );
+    expect(summaryLine([suspected, clean])).toBe('1 of 2 branch pairs may break when merged. No test has confirmed it.');
+    expect(summaryLine([clean])).toBe('The branch pair merges safely.');
+    expect(summaryLine([clean, capped])).toBe('All 2 branch pairs merge safely.');
+    expect(summaryLine([])).toBe('No branch pairs to compare.');
+  });
+});

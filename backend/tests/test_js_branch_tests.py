@@ -161,7 +161,7 @@ def test_harmless_js_pair_is_not_confirmed(jsrepo: Path) -> None:
 def test_js_disabled_reports_unsupported(jsrepo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "branch_tests_js_enabled", False)
     res = branch_tests.check_pair(jsrepo, "main", "feat/tuple", "feat/report")
-    assert res.status == "unsupported" and "disabled" in res.reason
+    assert res.reason == "JS/TS branch tests are disabled (2 files)"
     assert res.unsupported_files == ["src/report.test.js", "src/store.test.js"]
 
 

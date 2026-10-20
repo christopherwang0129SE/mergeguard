@@ -35,6 +35,7 @@ the reply is not a usable JSON assessment, that pair keeps the git score and
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from itertools import combinations
 from pathlib import Path
 
@@ -73,6 +74,38 @@ from app.services.usage import UsageMeter
 # colliding — git conflicts arise from adjacency, not just exact overlap.
 ADJACENCY_LINES = 3
 
+# Stage and pair events for POST /api/analyze/stream. The callback must not
+# mutate the pair. None keeps /api/analyze on the same scoring path.
+ProgressFn = Callable[[dict], None]
+
+
+def _emit(progress: ProgressFn | None, event: dict) -> None:
+    if progress is not None:
+        progress(event)
+
+
+def _stage(
+    progress: ProgressFn | None,
+    stage: str,
+    status: str,
+    label: str,
+    detail: str | None = None,
+) -> None:
+    event: dict = {"type": "stage", "stage": stage, "status": status, "label": label}
+    if detail:
+        event["detail"] = detail
+    _emit(progress, event)
+
+
+def _emit_pair(progress: ProgressFn | None, pair: PairRisk) -> None:
+    _emit(progress, {"type": "pair", "pair": pair})
+
+
+def _skip_detail(reason: FallbackReason) -> str:
+    if reason == "disabled":
+        return "Nemotron is disabled"
+    return "No Nebius API key is configured"
+
 
 def _ranges_collide(a: tuple[int, int], b: tuple[int, int], pad: int = ADJACENCY_LINES) -> bool:
     return a[0] - pad <= b[1] and b[0] - pad <= a[1]
@@ -101,6 +134,12 @@ def _level(score: float) -> RiskLevel:
     if score > 0:
         return "low"
     return "none"
+
+
+def _plural(count: int, singular: str, plural: str | None = None) -> str:
+    """``1 pair``, ``0 pairs``, ``2 shared files``. Only 1 is singular."""
+    word = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {word}"
 
 
 def combine_scores(git_score: float, model_score: float, overlapping_files: int) -> float:
@@ -136,12 +175,12 @@ def _score_pair(diff_a: BranchDiff, diff_b: BranchDiff) -> PairRisk:
 
     if overlapping:
         rationale = (
-            f"{overlapping} file(s) changed in overlapping regions by both branches — "
+            f"{_plural(overlapping, 'file')} changed in overlapping regions by both branches — "
             f"a textual merge conflict is likely."
         )
     elif shared:
         rationale = (
-            f"{len(shared)} shared file(s) but no overlapping regions — "
+            f"{_plural(len(shared), 'shared file')} but no overlapping regions — "
             f"merges cleanly today, but coordinate before divergence grows."
         )
     else:
@@ -390,6 +429,7 @@ def _refine_with_model(
     *,
     meter: UsageMeter | None = None,
     use_cache: bool = True,
+    progress: ProgressFn | None = None,
 ) -> list[PairRisk]:
     """Send only prefilter candidates, top K by signal, to the model."""
     limit = max(0, int(settings.nebius_max_pairs))
@@ -403,15 +443,15 @@ def _refine_with_model(
     for pair in pairs:
         ident = (pair.branch_a, pair.branch_b)
         if not pair.prefilter_candidate:
-            refined.append(pair.model_copy(update={"fallback_reason": "prefiltered"}))
+            updated = pair.model_copy(update={"fallback_reason": "prefiltered"})
         elif ident not in selected:
-            refined.append(pair.model_copy(update={"fallback_reason": "pair_cap"}))
+            updated = pair.model_copy(update={"fallback_reason": "pair_cap"})
         else:
-            refined.append(
-                _refine_one(
-                    repo, base_branch, diff_by_branch, pair, meter=meter, use_cache=use_cache
-                )
+            updated = _refine_one(
+                repo, base_branch, diff_by_branch, pair, meter=meter, use_cache=use_cache
             )
+        refined.append(updated)
+        _emit_pair(progress, updated)
     return refined
 
 
@@ -438,6 +478,7 @@ def _verify_high_risk(
     meter: UsageMeter,
     use_cache: bool,
     allowed: bool,
+    progress: ProgressFn | None = None,
 ) -> list[PairRisk]:
     limit = max(0, int(settings.verify_max_pairs))
     eligible = [p for p in pairs if verifier.is_high_risk(p)]
@@ -446,7 +487,8 @@ def _verify_high_risk(
     chosen_ids = {(p.branch_a, p.branch_b) for p in chosen}
     out: list[PairRisk] = []
     for pair in pairs:
-        if (pair.branch_a, pair.branch_b) not in chosen_ids:
+        ident = (pair.branch_a, pair.branch_b)
+        if ident not in chosen_ids:
             out.append(pair)
             continue
         if not allowed:
@@ -458,7 +500,9 @@ def _verify_high_risk(
             result = verifier.verify_pair(
                 repo, base_branch, pair, meter=meter, use_cache=use_cache
             )
-        out.append(apply_verification(pair, result))
+        updated = apply_verification(pair, result)
+        out.append(updated)
+        _emit_pair(progress, updated)
     return out
 
 
@@ -508,8 +552,17 @@ def apply_branch_tests(pair: PairRisk, result: BranchTests) -> PairRisk:
     return pair.model_copy(update=update)
 
 
-def _run_branch_tests(repo: Path, base_branch: str, pairs: list[PairRisk]) -> dict:
-    """Stage 0, no LLM: each candidate pair's own test files on the merge."""
+def _run_branch_tests(
+    repo: Path,
+    base_branch: str,
+    pairs: list[PairRisk],
+    on_result: Callable[[tuple[str, str], BranchTests], None] | None = None,
+) -> dict:
+    """No LLM: each candidate pair's own test files on the merge.
+
+    Eligibility is the caller's list (the pre-model pairs), so a low model
+    score cannot suppress a pair. ``on_result`` fires after each pair.
+    """
     results: dict[tuple[str, str], BranchTests] = {}
     budget = float(settings.branch_tests_total_seconds)
     started = time.monotonic()
@@ -520,8 +573,10 @@ def _run_branch_tests(repo: Path, base_branch: str, pairs: list[PairRisk]) -> di
                 status="skipped",
                 reason=f"branch-tests stage time budget ({budget:.0f}s) used up by earlier pairs",
             )
-            continue
-        results[key] = branch_tests.check_pair(repo, base_branch, pair.branch_a, pair.branch_b)
+        else:
+            results[key] = branch_tests.check_pair(repo, base_branch, pair.branch_a, pair.branch_b)
+        if on_result is not None:
+            on_result(key, results[key])
     return results
 
 
@@ -534,6 +589,7 @@ def analyze(
     verify: bool = False,
     verify_allowed: bool = False,
     focus: str | None = None,
+    progress: ProgressFn | None = None,
 ) -> AnalyzeResponse:
     """Score every branch pair (only pairs that include ``focus`` if given).
 
@@ -541,18 +597,34 @@ def analyze(
     pair) and verify-by-test on high-risk model-scored pairs.
     ``verify_allowed`` must be True for any test to execute: the caller
     decides it (local repo under the allowed roots, never a URL clone).
+
+    ``progress``, when given, receives ``stage`` and ``pair`` events as the
+    work moves. It does not affect the returned scores. The default ``None``
+    is what ``POST /api/analyze`` uses.
     """
     started = time.monotonic()
     meter = UsageMeter()
+
+    _stage(progress, "diff", "start", "Diffing branches against the base")
     diffs = [git_service.diff_against_base(repo, b, base_branch) for b in branches]
     diff_by_branch = {d.branch: d for d in diffs}
+    _stage(
+        progress,
+        "diff",
+        "done",
+        "Diffed branches against the base",
+        f"{len(branches)} branches",
+    )
 
     pairs: list[PairRisk] = []
     for a, b in combinations(branches, 2):
         if focus is None or focus in (a, b):
             pairs.append(_score_pair(diff_by_branch[a], diff_by_branch[b]))
     pairs.sort(key=lambda p: p.score, reverse=True)
+    for pair in pairs:
+        _emit_pair(progress, pair)
 
+    _stage(progress, "prefilter", "start", "Checking which pairs share files or symbols")
     signals = _prefilter_signals(repo, diff_by_branch, pairs)
     pairs = [
         p.model_copy(
@@ -565,34 +637,109 @@ def analyze(
         for p in pairs
     ]
     pairs = [_with_static_checks(repo, base_branch, p) for p in pairs]
-
-    # Before and independent of the model: a low model score cannot suppress it.
-    branch_results: dict[tuple[str, str], BranchTests] = {}
-    if verify and verify_allowed and settings.branch_tests_enabled:
-        branch_results = _run_branch_tests(repo, base_branch, pairs)
+    # Chosen here, before any model score exists, so a low score cannot drop a
+    # pair. The runs themselves happen after verify so streamed stages follow
+    # diff -> prefilter -> model -> verify -> branch tests.
+    branch_input = list(pairs)
+    kept = sum(1 for p in pairs if p.prefilter_candidate)
+    _stage(
+        progress,
+        "prefilter",
+        "done",
+        "Finished the static prefilter",
+        f"{kept} of {len(pairs)} pairs kept",
+    )
+    for pair in pairs:
+        _emit_pair(progress, pair)
 
     skip = _model_skip_reason()
     if skip:
+        _stage(progress, "model", "skipped", "Skipped Nemotron scoring", _skip_detail(skip))
         pairs = [pair.model_copy(update={"fallback_reason": skip}) for pair in pairs]
+        for pair in pairs:
+            _emit_pair(progress, pair)
     else:
+        _stage(progress, "model", "start", "Scoring pairs with Nemotron")
         pairs = _refine_with_model(
-            repo, base_branch, diff_by_branch, pairs, meter=meter, use_cache=use_cache
+            repo,
+            base_branch,
+            diff_by_branch,
+            pairs,
+            meter=meter,
+            use_cache=use_cache,
+            progress=progress,
         )
         pairs.sort(key=lambda p: p.score, reverse=True)
+        sent = sum(1 for p in pairs if p.score_source == "model")
+        _stage(
+            progress,
+            "model",
+            "done",
+            "Finished Nemotron scoring",
+            f"{_plural(sent, 'pair')} scored by the model",
+        )
 
     if verify and settings.verify_enabled and not skip:
+        _stage(progress, "verify", "start", "Running intent tests on high-risk pairs")
         pairs = _verify_high_risk(
-            repo, base_branch, pairs, meter=meter, use_cache=use_cache, allowed=verify_allowed
+            repo,
+            base_branch,
+            pairs,
+            meter=meter,
+            use_cache=use_cache,
+            allowed=verify_allowed,
+            progress=progress,
         )
         pairs.sort(key=lambda p: p.score, reverse=True)
+        confirmed = sum(
+            1 for p in pairs if p.verification and p.verification.status == "confirmed"
+        )
+        _stage(
+            progress,
+            "verify",
+            "done",
+            "Finished intent tests",
+            f"{_plural(confirmed, 'pair')} confirmed",
+        )
+    else:
+        if not verify:
+            why = "Verification was not requested"
+        elif not settings.verify_enabled:
+            why = "Verify-by-test is disabled"
+        else:
+            why = "Nemotron did not score pairs, so intent tests were not run"
+        _stage(progress, "verify", "skipped", "Skipped intent tests", why)
 
-    if branch_results:
-        pairs = [
-            apply_branch_tests(p, branch_results[(p.branch_a, p.branch_b)])
-            if (p.branch_a, p.branch_b) in branch_results else p
-            for p in pairs
-        ]
+    if verify and verify_allowed and settings.branch_tests_enabled:
+        _stage(progress, "branch_tests", "start", "Running each branch's tests on the merge")
+        current = {(p.branch_a, p.branch_b): p for p in pairs}
+
+        def on_result(key: tuple[str, str], result: BranchTests) -> None:
+            updated = apply_branch_tests(current[key], result)
+            current[key] = updated
+            _emit_pair(progress, updated)
+
+        _run_branch_tests(repo, base_branch, branch_input, on_result=on_result)
+        pairs = [current[(p.branch_a, p.branch_b)] for p in pairs]
         pairs.sort(key=lambda p: p.score, reverse=True)
+        confirmed_tests = sum(
+            1 for p in pairs if p.branch_tests and p.branch_tests.status == "confirmed"
+        )
+        _stage(
+            progress,
+            "branch_tests",
+            "done",
+            "Finished branch tests",
+            f"{_plural(confirmed_tests, 'pair')} confirmed",
+        )
+    else:
+        if not verify:
+            why = "Branch tests run only when verification is requested"
+        elif not settings.branch_tests_enabled:
+            why = "Branch tests are disabled"
+        else:
+            why = "Branch tests only run on local repos under the allowed roots"
+        _stage(progress, "branch_tests", "skipped", "Skipped branch tests", why)
 
     risk_model = settings.nebius_model if any(p.score_source == "model" for p in pairs) else None
     usage = UsageSummary(

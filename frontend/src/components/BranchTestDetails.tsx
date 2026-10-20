@@ -1,9 +1,11 @@
 import type { BranchTestRun, BranchTests } from '../types';
 import { CodeBlock } from './CodeBlock';
-import { ProofTable } from './ProofTable';
+import { TruthTable } from './TruthTable';
 
 interface BranchTestDetailsProps {
   branchTests: BranchTests;
+  branchA: string;
+  branchB: string;
 }
 
 const STATUS: Record<BranchTests['status'], { label: string; tone: 'fail' | 'pass' | 'neutral' | 'warn' }> = {
@@ -39,23 +41,24 @@ const runSummary = (run: BranchTestRun): string => {
  * Deterministic "branch tests on merge" result: the test files each branch
  * added or modified, run on its own branch and on the A+B merge. No LLM.
  */
-export const BranchTestDetails = ({ branchTests }: BranchTestDetailsProps) => {
+export const BranchTestDetails = ({ branchTests, branchA, branchB }: BranchTestDetailsProps) => {
   const status = STATUS[branchTests.status];
   const confirmed = branchTests.status === 'confirmed';
   return (
-    <section className="fact" data-status={branchTests.status} data-testid="branch-tests">
-      <h4 className="fact-label">
-        Branch tests
-        <span className="fact-sub">no LLM</span>
-      </h4>
-      <div className="fact-body">
+    <section className="block" data-status={branchTests.status} data-testid="branch-tests" aria-labelledby="branch-tests-heading">
+      <h3 id="branch-tests-heading" className="block-title">
+        Branch tests <span className="block-sub">each branch&apos;s own tests on the merge, no LLM</span>
+      </h3>
+      <div className="block-body">
         <p className="status-line">
           <span className="status" data-tone={status.tone}>
             {status.label}
           </span>
           {!confirmed && <span className="status-reason">{branchTests.reason}</span>}
         </p>
-        {confirmed && <ProofTable runs={branchTests.runs} label="Branch test results per checkout" />}
+        {branchTests.runs.length > 0 && (
+          <TruthTable runs={branchTests.runs} branchA={branchA} branchB={branchB} label="Branch test results per checkout" />
+        )}
         {branchTests.confirming.length > 0 && (
           <ul className="failures" aria-label="Branch tests failing on merge">
             {branchTests.confirming.map((failure) => (

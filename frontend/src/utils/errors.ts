@@ -39,5 +39,21 @@ export const describeError = (message: string, apiBase: string): ErrorHelp => {
       fix: { text: 'Check the base branch name, or push at least two branches besides it.' },
     };
   }
+  if (/^demo mode/i.test(message)) {
+    return {
+      title: 'This deployment only runs the bundled demos',
+      body: message,
+      fix: { text: 'Choose Try demo repo or Try API demo (Tavily), or run MergeGuard locally to analyze your own repository.' },
+    };
+  }
+  if (/clone failed/i.test(message)) {
+    return {
+      title: "Couldn't clone that repository",
+      body: message,
+      fix: {
+        text: 'Check the URL and that the repository is public. GitHub repo and pull request URLs both work, for example https://github.com/owner/repo/pull/12.',
+      },
+    };
+  }
   return { title: 'Analysis failed', body: message };
 };

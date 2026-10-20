@@ -167,3 +167,60 @@ const testFact = (pairs: PairRisk[]): string => {
   if (considered.length > ran) fact += `; ${considered.length - ran} skipped`;
   return `${fact}.`;
 };
+
+/** What MergeGuard concluded about one pair, in one word. */
+export type PairVerdict = 'confirmed' | 'suspected' | 'clean' | 'skipped';
+
+/**
+ * confirmed: a test passes on its own branch and fails on the merge.
+ * suspected: the diff or Nemotron flags medium+ risk, no test proved it.
+ * skipped: the pair shares code but Nemotron never reviewed it (pair cap,
+ * model error) and the git score alone is low.
+ * clean: nothing to act on.
+ */
+export const pairVerdict = (pair: PairRisk): PairVerdict => {
+  if (isConfirmedByTest(pair)) return 'confirmed';
+  if (needsAttention(pair)) return 'suspected';
+  const unreviewed =
+    pair.fallback_reason === 'pair_cap' ||
+    pair.fallback_reason === 'model_error' ||
+    pair.fallback_reason === 'unparsable';
+  if (unreviewed && pair.shared_files > 0) return 'skipped';
+  return 'clean';
+};
+
+export const VERDICT_TEXT: Record<PairVerdict, string> = {
+  confirmed: 'Confirmed',
+  suspected: 'Suspected',
+  clean: 'Clean',
+  skipped: 'Not reviewed',
+};
+
+/** Pairs worst first: confirmed, then by score. */
+export const rankPairs = (pairs: PairRisk[]): PairRisk[] => {
+  const order: Record<PairVerdict, number> = { confirmed: 0, suspected: 1, skipped: 2, clean: 3 };
+  return [...pairs].sort(
+    (a, b) => order[pairVerdict(a)] - order[pairVerdict(b)] || b.score - a.score || a.branch_a.localeCompare(b.branch_a)
+  );
+};
+
+/**
+ * The one sentence a judge reads first, e.g. "1 of 3 branch pairs breaks
+ * when merged, confirmed by test."
+ */
+export const summaryLine = (pairs: PairRisk[]): string => {
+  const total = pairs.length;
+  if (total === 0) return 'No branch pairs to compare.';
+  const confirmed = pairs.filter((p) => pairVerdict(p) === 'confirmed').length;
+  const suspected = pairs.filter((p) => pairVerdict(p) === 'suspected').length;
+  const of = `of ${plural(total, 'branch pair')}`;
+  if (confirmed > 0) {
+    const verb = confirmed === 1 ? 'breaks' : 'break';
+    const more = suspected > 0 ? ` ${suspected} more ${suspected === 1 ? 'looks' : 'look'} risky.` : '';
+    return `${confirmed} ${of} ${verb} when merged, confirmed by test.${more}`;
+  }
+  if (suspected > 0) {
+    return `${suspected} ${of} may break when merged. No test has confirmed it.`;
+  }
+  return total === 1 ? 'The branch pair merges safely.' : `All ${total} branch pairs merge safely.`;
+};

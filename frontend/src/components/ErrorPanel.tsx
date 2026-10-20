@@ -17,7 +17,7 @@ export const ErrorPanel = forwardRef<HTMLHeadingElement, ErrorPanelProps>(({ hel
       <>
         <p>{help.fix.text}</p>
         {help.fix.command && (
-          <pre className="code command" role="region" tabIndex={0} aria-label="Command to run">
+          <pre className="command" role="region" tabIndex={0} aria-label="Command to run">
             <code>{help.fix.command}</code>
           </pre>
         )}

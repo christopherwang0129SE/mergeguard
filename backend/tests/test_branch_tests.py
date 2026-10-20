@@ -8,7 +8,7 @@ import pytest
 
 from app.config import settings
 from app.schemas import BranchTestRun
-from app.services import branch_tests, sentinel
+from app.services import branch_tests, git_service, sentinel
 
 FILLER = "".join(f"# filler line {i}\n" for i in range(12))
 STORE = '''def read_floor():
@@ -149,9 +149,72 @@ def test_module_that_no_longer_imports_on_the_merge_is_confirmed(brepo: Path) ->
 def test_js_tests_without_a_runner_are_unsupported_and_no_tests_is_skipped(brepo: Path) -> None:
     res = branch_tests.check_pair(brepo, "main", "feat/ts", "docs/readme")
     assert res.status == "unsupported" and res.unsupported_files == ["web/app.test.ts"]
+    assert "file(s)" not in res.reason
+    assert "1 file" in res.reason or "1 JS/TS test file" in res.reason
     assert res.runs == []
     res = branch_tests.check_pair(brepo, "main", "feat/delta", "docs/readme")
     assert res.status == "skipped"
+
+
+def test_branch_test_reasons_pluralize_file_counts(
+    brepo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disabled JS, a missing runner, and a mixed run each name 1 file or N files."""
+
+    def only_js(files_a: list[str], files_b: list[str]):
+        def changed(_repo, _base, head):
+            return ([], files_a) if head == heads[0] else ([], files_b)
+
+        return changed
+
+    heads = (
+        git_service.rev_parse(brepo, "feat/tuple"),
+        git_service.rev_parse(brepo, "docs/readme"),
+    )
+    monkeypatch.setattr(settings, "branch_tests_js_enabled", False)
+    monkeypatch.setattr(branch_tests, "changed_test_files", only_js(["web/a.test.ts"], []))
+    one = branch_tests.check_pair(brepo, "main", "feat/tuple", "docs/readme")
+    assert one.reason == "JS/TS branch tests are disabled (1 file)"
+    monkeypatch.setattr(
+        branch_tests, "changed_test_files", only_js(["web/a.test.ts"], ["web/b.test.ts"])
+    )
+    two = branch_tests.check_pair(brepo, "main", "feat/tuple", "docs/readme")
+    assert two.reason == "JS/TS branch tests are disabled (2 files)"
+
+    monkeypatch.setattr(settings, "branch_tests_js_enabled", True)
+    monkeypatch.setattr(branch_tests.js_tests, "node_binary", lambda: "node")
+    monkeypatch.setattr(branch_tests, "changed_test_files", only_js(["web/a.test.ts"], []))
+    missing = branch_tests.check_pair(brepo, "main", "feat/tuple", "docs/readme")
+    assert missing.reason == "no vitest/jest setup found for the 1 JS/TS test file"
+    monkeypatch.setattr(
+        branch_tests, "changed_test_files", only_js(["web/a.test.ts", "web/b.test.ts"], [])
+    )
+    missing_two = branch_tests.check_pair(brepo, "main", "feat/tuple", "docs/readme")
+    assert missing_two.reason == "no vitest/jest setup found for the 2 JS/TS test files"
+
+    def fake_run(workdir, tmp_root, *, target, ref, files, python, src_root, timeout):
+        return BranchTestRun(target=target, ref=ref, files=files, exit_code=0), {}
+
+    monkeypatch.setattr(settings, "branch_tests_js_enabled", False)
+    monkeypatch.setattr(branch_tests, "run_files", fake_run)
+
+    def with_python(js_a: list[str], js_b: list[str]):
+        def changed(_repo, _base, head):
+            if head == heads[0]:
+                return ["test_store.py"], js_a
+            return [], js_b
+
+        return changed
+
+    monkeypatch.setattr(branch_tests, "changed_test_files", with_python(["web/a.test.ts"], []))
+    mixed = branch_tests.check_pair(brepo, "main", "feat/tuple", "docs/readme")
+    assert mixed.reason.endswith("; 1 test file not run")
+    monkeypatch.setattr(
+        branch_tests, "changed_test_files", with_python(["web/a.test.ts"], ["web/b.test.ts"])
+    )
+    mixed_two = branch_tests.check_pair(brepo, "main", "feat/tuple", "docs/readme")
+    assert mixed_two.reason.endswith("; 2 test files not run")
+    assert "file(s)" not in mixed.reason and "file(s)" not in mixed_two.reason
 
 
 def test_flaky_merge_failure_is_dropped(brepo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,7 +260,10 @@ def test_junit_ids_and_excerpts(tmp_path: Path) -> None:
 def test_analyze_confirms_by_branch_test_without_any_model(brepo: Path) -> None:
     """No API key: the model never runs, the branch tests still confirm."""
     branches = ["feat/tuple", "feat/report", "feat/describe"]
-    res = sentinel.analyze(brepo, "main", branches, verify=True, verify_allowed=True)
+    seen: list[dict] = []
+    res = sentinel.analyze(
+        brepo, "main", branches, verify=True, verify_allowed=True, progress=seen.append
+    )
     by_pair = {frozenset((p.branch_a, p.branch_b)): p for p in res.pairs}
     hot = by_pair[frozenset(("feat/tuple", "feat/report"))]
     assert hot.fallback_reason == "no_api_key" and hot.verification is None
@@ -210,6 +276,14 @@ def test_analyze_confirms_by_branch_test_without_any_model(brepo: Path) -> None:
     assert res.usage is not None
     assert res.usage.branch_test_confirmed == 1 and res.usage.llm_calls == 0
     assert res.pairs[0] is hot
+    done = next(
+        event["detail"]
+        for event in seen
+        if event["type"] == "stage"
+        and event["stage"] == "branch_tests"
+        and event["status"] == "done"
+    )
+    assert done == "1 pair confirmed"
 
 
 def test_branch_tests_respect_allowed_roots_and_opt_out(

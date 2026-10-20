@@ -1,36 +1,45 @@
 /*
- * Tokens. One neutral ramp, one accent (blue: links, focus, primary action),
- * and red / green / amber only where they mean fail / pass / warn.
+ * Tokens. Cool paper and graphite ink; blue is the only accent (primary
+ * action, links, focus, selection). Red / green mean fail / pass. Amber marks
+ * code both branches changed. Nothing else carries colour.
  */
 :root {
-  --bg: #ffffff;
-  --bg-subtle: #f6f7f9;
-  --fg: #16181d;
-  --fg-muted: #5a606b; /* 6.3:1 on --bg, 5.9:1 on --bg-subtle */
-  --line: #e2e4e8;
-  --line-strong: #c4c8cf;
-  --control: #858b96; /* input and button edges: 3:1 on --bg (WCAG 1.4.11) */
+  --paper: #f4f6f8;
+  --surface: #ffffff;
+  --ink: #12161c;
+  --ink-2: #4b5360; /* 7.4:1 on --surface, 6.9:1 on --paper */
+  --ink-3: #6a7280; /* 4.8:1 on --surface: small labels only */
+  --rule: #dce0e6;
+  --rule-strong: #b9bfc8;
+  --control: #7d8592; /* control edges, 3.6:1 on --surface (WCAG 1.4.11) */
 
-  --accent: #0a57c2; /* 6.7:1 on white */
+  --accent: #1d5bd6; /* 5.9:1 on white */
+  --accent-hover: #1749b0;
   --accent-fg: #ffffff;
-  --accent-hover: #084aa6;
+  --accent-wash: #e8effc;
 
-  --fail: #b42318; /* 6.6:1 on --bg, 6.0:1 on --fail-bg */
-  --fail-bg: #fdf1ef;
-  --pass: #17683f; /* 6.8:1 */
-  --warn: #8a5300; /* 6.3:1 */
+  --fail: #b8322a; /* 5.9:1 */
+  --fail-wash: #fcecea;
+  --pass: #1b7146; /* 6.1:1 */
+  --pass-wash: #e7f4ec;
+  --overlap: #8f5600; /* 6.0:1, text */
+  --overlap-mark: #e3a32b; /* gutter band, non-text */
+  --overlap-wash: #fdf3df;
 
-  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --add-wash: #e9f5ee;
+  --del-wash: #fcefed;
 
-  /* Type scale: 12 / 13 / 14 / 16 / 18. */
-  --text-xs: 0.75rem;
-  --text-sm: 0.8125rem;
-  --text-md: 0.875rem;
-  --text-lg: 1rem;
-  --text-xl: 1.125rem;
+  --sans: 'Schibsted Grotesk Variable', 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Azeret Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-  /* Spacing: 4px grid. */
+  /* Type scale, 16px body. */
+  --t-xs: 0.8125rem; /* 13 */
+  --t-sm: 0.875rem; /* 14 */
+  --t-md: 1rem; /* 16 */
+  --t-lg: 1.1875rem; /* 19 */
+  --t-xl: 1.5rem; /* 24 */
+  --t-2xl: 2rem; /* 32 */
+
   --s1: 4px;
   --s2: 8px;
   --s3: 12px;
@@ -38,36 +47,53 @@
   --s5: 24px;
   --s6: 32px;
   --s7: 48px;
+  --s8: 64px;
 
-  --radius: 4px;
+  /* Radii: controls 6px, panels 8px. Nothing is a pill. */
+  --r-control: 6px;
+  --r-panel: 8px;
+
+  --shadow-panel: 0 1px 2px rgb(18 22 28 / 0.05), 0 2px 8px rgb(18 22 28 / 0.04);
 
   color-scheme: light;
   font-family: var(--sans);
   font-size: 100%;
-  color: var(--fg);
-  background: var(--bg);
+  font-optical-sizing: auto;
+  color: var(--ink);
+  background: var(--paper);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #111317;
-    --bg-subtle: #191c21;
-    --fg: #e7e9ec;
-    --fg-muted: #9ba2ad;
-    --line: #2a2e35;
-    --line-strong: #3d424b;
-    --control: #6c727d;
+    --paper: #0e1115;
+    --surface: #151a20;
+    --ink: #e8ebf0;
+    --ink-2: #a8b0bc;
+    --ink-3: #8b94a1;
+    --rule: #262c35;
+    --rule-strong: #3a424d;
+    --control: #66707d;
 
-    --accent: #79a8ff;
-    --accent-fg: #0b1220;
-    --accent-hover: #9dbfff;
+    --accent: #7aa7ff;
+    --accent-hover: #a2c1ff;
+    --accent-fg: #0a1326;
+    --accent-wash: #16233c;
 
-    --fail: #ff8a80;
-    --fail-bg: #2a1716;
-    --pass: #5fcf86;
-    --warn: #e0b04a;
+    --fail: #ff8c82;
+    --fail-wash: #2c1715;
+    --pass: #63d08e;
+    --pass-wash: #10261a;
+    --overlap: #f0bb55;
+    --overlap-mark: #c68b1d;
+    --overlap-wash: #2a2010;
+
+    --add-wash: #11241a;
+    --del-wash: #2a1716;
+
+    --shadow-panel: 0 1px 2px rgb(0 0 0 / 0.4);
 
     color-scheme: dark;
   }
@@ -81,12 +107,13 @@
 
 html {
   -webkit-text-size-adjust: 100%;
+  scroll-padding-top: var(--s5);
 }
 
 body {
   margin: 0;
-  font-size: var(--text-md);
-  line-height: 1.5;
+  font-size: var(--t-md);
+  line-height: 1.55;
   min-width: 320px;
 }
 
@@ -99,8 +126,21 @@ ul,
 ol,
 dl,
 dd,
-pre {
+pre,
+figure {
   margin: 0;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
 }
 
 ul,
@@ -113,23 +153,33 @@ code,
 pre,
 kbd {
   font-family: var(--mono);
-  font-size: var(--text-sm);
+  font-size: 0.875em;
 }
 
 a {
   color: var(--accent);
-  text-underline-offset: 0.18em;
-  text-decoration-thickness: from-font;
+  text-underline-offset: 0.2em;
+  text-decoration-thickness: 1px;
 }
 
 a:hover {
   color: var(--accent-hover);
+  text-decoration-thickness: 2px;
 }
 
 button,
 input {
   font: inherit;
   color: inherit;
+}
+
+::selection {
+  background: var(--accent-wash);
+  color: var(--ink);
+}
+
+input {
+  caret-color: var(--accent);
 }
 
 :focus-visible {
@@ -140,6 +190,11 @@ input {
 /* Headings that receive focus programmatically get no ring on mouse runs. */
 [tabindex='-1']:focus:not(:focus-visible) {
   outline: none;
+}
+
+* {
+  scrollbar-color: var(--rule-strong) transparent;
+  scrollbar-width: thin;
 }
 
 .sr-only {
@@ -160,11 +215,10 @@ input {
 
 .mono {
   font-family: var(--mono);
-  font-size: var(--text-sm);
 }
 
 .muted {
-  color: var(--fg-muted);
+  color: var(--ink-2);
 }
 
 @media (prefers-reduced-motion: reduce) {
