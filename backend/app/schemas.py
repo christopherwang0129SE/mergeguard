@@ -320,3 +320,49 @@ class GitHubReviewQueueResponse(BaseModel):
     repository: str
     review_sla_hours: int
     items: list[GitHubReviewQueueItem]
+
+
+# ---------------------------------------------------------------------------
+# Planner Agent
+# ---------------------------------------------------------------------------
+
+
+class PlanRequest(BaseModel):
+    """Ask the Planner to suggest a merge order.
+
+    Pass either a completed ``analysis`` object (from a previous
+    ``/api/analyze`` call) or a ``repo_path`` / ``repo_url`` so the Planner
+    can run the Sentinel itself before planning.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    analysis: AnalyzeResponse | None = Field(
+        None,
+        description="Pre-computed Sentinel result. Provide this OR repo_path/repo_url.",
+    )
+    repo_path: str | None = Field(None, description="Absolute path to a local git repo.")
+    repo_url: str | None = Field(None, description="Git URL to clone (https).")
+    base_branch: str | None = Field(None, description="Integration branch (default: main).")
+    branches: list[str] | None = Field(
+        None, description="Branches to plan. Defaults to all non-base local branches."
+    )
+
+
+class MergeStepResponse(BaseModel):
+    branch: str
+    position: int
+    zone: int
+    risk_score: float
+    status: Literal["safe", "caution", "danger"]
+    conflicts_with: list[str]
+    rationale: str
+
+
+class PlanResponse(BaseModel):
+    steps: list[MergeStepResponse]
+    zones: list[list[str]]
+    summary: str
+    parallelisable: bool
+    base_branch: str
+    branches: list[str]

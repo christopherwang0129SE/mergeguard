@@ -14,10 +14,13 @@ from app.schemas import (
     AnalyzeResponse,
     GitHubPullRequestSyncResponse,
     GitHubReviewQueueResponse,
+    MergeStepResponse,
+    PlanRequest,
+    PlanResponse,
     ResolveRequest,
     ResolveResponse,
 )
-from app.services import git_service, github_service, resolver, sentinel
+from app.services import git_service, github_service, planner, resolver, sentinel
 
 router = APIRouter()
 
@@ -189,4 +192,52 @@ def github_review_queue() -> GitHubReviewQueueResponse:
         repository=repository,
         review_sla_hours=settings.github_review_sla_hours,
         items=items,
+    )
+
+
+@router.post("/plan", response_model=PlanResponse)
+def plan(req: PlanRequest) -> PlanResponse:
+    """Suggest a safe merge order for in-flight branches.
+
+    Accepts either a pre-computed ``analysis`` object from a previous
+    ``/api/analyze`` call, or a ``repo_path`` / ``repo_url`` so the Planner
+    can run the Sentinel first.
+    """
+    if req.analysis is not None:
+        analysis = req.analysis
+        base = analysis.base_branch
+    else:
+        # Run Sentinel first, then plan.
+        analyze_req = AnalyzeRequest(
+            repo_path=req.repo_path,
+            repo_url=req.repo_url,
+            base_branch=req.base_branch,
+            branches=req.branches,
+        )
+        try:
+            analysis = analyze(analyze_req)  # reuse existing route logic
+        except HTTPException:
+            raise
+        base = analysis.base_branch
+
+    result = planner.plan(analysis)
+
+    return PlanResponse(
+        steps=[
+            MergeStepResponse(
+                branch=s.branch,
+                position=s.position,
+                zone=s.zone,
+                risk_score=s.risk_score,
+                status=s.status,
+                conflicts_with=s.conflicts_with,
+                rationale=s.rationale,
+            )
+            for s in result.steps
+        ],
+        zones=result.zones,
+        summary=result.summary,
+        parallelisable=result.parallelisable,
+        base_branch=base,
+        branches=analysis.branches,
     )
