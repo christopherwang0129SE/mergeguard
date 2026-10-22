@@ -9,7 +9,8 @@ scratch on every run:
   a pydantic model. Pricing helpers assume the payload is already in dollars.
   Tests run with ``python3 -m unittest`` and do not touch the network. If
   ``requests`` or ``pydantic`` is not installed, the tests stub them; the
-  logic under test is pure.
+  logic under test is pure. ``requirements.txt`` on main lists ``requests``
+  and ``pydantic``, so every branch declares those dependencies.
 - ``feat/cents-payload``: the payload is integer cents. ``normalize_amount``
   and the pydantic ``field_validator`` divide by 100, and the HTTP helper
   grows a second ``session.mount`` plus an explicit ``session.get`` timeout.
@@ -391,6 +392,7 @@ def create_repo() -> None:
     write(DEMO_DIR / "client.py", CLIENT_MAIN)
     write(DEMO_DIR / "tests" / "test_client.py", TESTS_MAIN)
     write(DEMO_DIR / "README.md", README_MAIN)
+    write(DEMO_DIR / "requirements.txt", "requests\npydantic\n")
     git(DEMO_DIR, "add", "-A")
     git(DEMO_DIR, "commit", "-q", "-m", "Add quote client with requests and pydantic",
         when=DATE_MAIN)

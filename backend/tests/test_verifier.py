@@ -745,3 +745,287 @@ def test_shape_failures_never_confirm_but_behaviour_failures_still_do(
     result = verifier.verify_pair(vrepo, "main", _pair(), use_cache=False)
     assert result.status == "confirmed", result.reason
     assert result.confirming_tests == ["test_branch_b_total_adds_ten"]
+
+
+def _intent(import_line: str) -> str:
+    return (
+        f"{import_line}\n\n\n"
+        "def test_branch_a_x():\n"
+        "    pass\n\n\n"
+        "def test_branch_b_y():\n"
+        "    pass\n"
+    )
+
+
+def test_requirements_txt_declares_network_clients(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text(
+        "\n".join([
+            "# runtime",
+            "Requests[security]>=2.32",
+            "httpx[http2]>=0.27 ; python_version >= '3.11'",
+            "aiohttp @ https://example.com/aiohttp.tar.gz#sha256=abc",
+            "URLLib3==2.2.0",
+            "requests-mock>=1",  # not the requests distribution
+            "pydantic>=2",
+            "-r other.txt",
+            "-e .",
+            "",
+        ])
+    )
+    # A requirements file that is not at the root (and not requirements/*.txt)
+    # is not the repo's declared dependency list.
+    nested = tmp_path / "pkg"
+    nested.mkdir()
+    (nested / "requirements.txt").write_text("httpx\n")
+    assert verifier.declared_network_modules(tmp_path) == frozenset({
+        "requests", "httpx", "aiohttp", "urllib3",
+    })
+
+
+def test_requirements_variants_and_requirements_directory(tmp_path: Path) -> None:
+    (tmp_path / "requirements-dev.txt").write_text("httpx\n")
+    (tmp_path / "requirements_test.txt").write_text("aiohttp\n")
+    reqs = tmp_path / "requirements"
+    reqs.mkdir()
+    (reqs / "prod.txt").write_text("urllib3\nrequests\n")
+    (reqs / "notes.md").write_text("requests\n")  # not a txt manifest
+    deeper = reqs / "nested"
+    deeper.mkdir()
+    (deeper / "extra.txt").write_text("httpx\n")  # requirements/*/*.txt is out of scope
+    assert verifier.declared_network_modules(tmp_path) == frozenset({
+        "requests", "httpx", "aiohttp", "urllib3",
+    })
+
+
+def test_pyproject_project_and_optional_dependencies(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\n"
+        "name = 'demo'\n"
+        "version = '0.1.0'\n"
+        "dependencies = [\n"
+        "  'Requests>=2',\n"
+        "  'pydantic>=2',\n"
+        "]\n"
+        "\n"
+        "[project.optional-dependencies]\n"
+        "dev = ['HTTPX>=0.27']\n"
+        "cli = ['AIOHTTP>=3']\n"
+        "broken = 'urllib3'\n"  # not a list: ignored, not guessed
+    )
+    assert verifier.declared_network_modules(tmp_path) == frozenset({
+        "requests", "httpx", "aiohttp",
+    })
+
+
+def test_pyproject_poetry_dependencies(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.poetry.dependencies]\n"
+        "python = '^3.11'\n"
+        "requests = '^2.31'\n"
+        "urllib3 = {version = '^2', optional = true}\n"
+        "httpx = {version = '>=0.27', extras = ['http2']}\n"
+        "\n"
+        "[tool.poetry.group.dev.dependencies]\n"
+        "aiohttp = '*'\n"  # group tables are not [tool.poetry.dependencies]
+    )
+    assert verifier.declared_network_modules(tmp_path) == frozenset({
+        "requests", "urllib3", "httpx",
+    })
+
+
+def test_setup_cfg_install_requires(tmp_path: Path) -> None:
+    (tmp_path / "setup.cfg").write_text(
+        "[metadata]\n"
+        "name = demo\n"
+        "\n"
+        "[options]\n"
+        "install_requires =\n"
+        "    requests>=2.31\n"
+        "    httpx[http2]>=0.27\n"
+        "    pydantic\n"
+        "\n"
+        "[options.extras_require]\n"
+        "dev =\n"
+        "    aiohttp\n"
+    )
+    assert verifier.declared_network_modules(tmp_path) == frozenset({"requests", "httpx"})
+
+
+def test_pipfile_packages(tmp_path: Path) -> None:
+    (tmp_path / "Pipfile").write_text(
+        "[packages]\n"
+        "requests = '*'\n"
+        "aiohttp = {extras = ['speedups'], version = '>=3'}\n"
+        "urllib3 = '==2.2.0'\n"
+        "\n"
+        "[dev-packages]\n"
+        "httpx = '*'\n"
+    )
+    assert verifier.declared_network_modules(tmp_path) == frozenset({
+        "requests", "aiohttp", "urllib3",
+    })
+
+
+def test_setup_py_install_requires_strings_are_scanned_not_executed(tmp_path: Path) -> None:
+    (tmp_path / "setup.py").write_text(
+        "raise SystemExit('setup.py was executed')\n"
+        "\n"
+        "# install_requires=['httpx']\n"
+        "setup(\n"
+        "    name='demo',\n"
+        "    install_requires=[\n"
+        "        'requests[security]>=2.31',\n"
+        "        \"aiohttp>=3\",\n"
+        "    ],\n"
+        ")\n"
+    )
+    assert verifier.declared_network_modules(tmp_path) == frozenset({"requests", "aiohttp"})
+    # A name that is not a literal in install_requires is not executed or guessed.
+    (tmp_path / "setup.py").write_text(
+        "REQUIRES = ['urllib3']\n"
+        "setup(install_requires=REQUIRES)\n"
+    )
+    assert verifier.declared_network_modules(tmp_path) == frozenset()
+
+
+def test_unparseable_manifests_contribute_nothing(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("this = [\n")
+    (tmp_path / "setup.cfg").write_text("[options\ninstall_requires = requests\n")
+    (tmp_path / "Pipfile").write_text("[packages\nrequests = '*'\n")
+    assert verifier.declared_network_modules(tmp_path) == frozenset()
+    # A sibling that does parse still counts. The broken files add nothing.
+    (tmp_path / "requirements.txt").write_text("httpx\n")
+    assert verifier.declared_network_modules(tmp_path) == frozenset({"httpx"})
+
+
+def test_manifest_outside_the_tree_and_oversize_are_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("requests\n")
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "requirements.txt").symlink_to(outside)
+    assert verifier.declared_network_modules(root) == frozenset()
+
+    monkeypatch.setattr(verifier, "_MAX_MANIFEST_CHARS", 16)
+    (root / "requirements.txt").unlink()
+    (root / "requirements.txt").write_text("requests\n" + ("x" * 32))
+    assert verifier.declared_network_modules(root) == frozenset()
+    # A missing git ref fails closed too.
+    assert verifier.declared_network_modules(root, "HEAD") == frozenset()
+
+
+def test_declared_modules_follow_the_git_ref_not_the_dirty_worktree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "requirements.txt").write_text("httpx\n")
+    (repo / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0'\ndependencies=['aiohttp']\n"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "deps")
+    (repo / "requirements.txt").write_text("requests\n")  # dirty worktree
+    assert verifier.declared_network_modules(repo, "HEAD") == frozenset({"httpx", "aiohttp"})
+    assert verifier.declared_network_modules(repo) == frozenset({"requests", "aiohttp"})
+
+
+def test_network_clients_allowed_only_when_declared() -> None:
+    requests_test = _intent("import requests")
+    adapters = _intent("from requests.adapters import HTTPAdapter")
+    httpx_test = _intent("from httpx import Client")
+    allowed = frozenset({"requests", "httpx"})
+    assert verifier.validate_code(requests_test) is not None
+    assert "forbidden module requests" in (verifier.validate_code(requests_test) or "")
+    assert verifier.validate_code(requests_test, allowed) is None
+    assert verifier.validate_code(adapters, allowed) is None
+    assert verifier.validate_code(httpx_test, allowed) is None
+    assert "forbidden module requests" in (verifier.validate_code(adapters, frozenset()) or "")
+    # Declaring one client does not open the others.
+    only_requests = frozenset({"requests"})
+    assert "forbidden module httpx" in (verifier.validate_code(httpx_test, only_requests) or "")
+
+
+def test_low_level_modules_stay_forbidden_even_if_named() -> None:
+    for module in ("socket", "subprocess", "urllib", "urllib.request", "http.client",
+                   "ssl", "asyncio", "shutil", "ctypes"):
+        code = _intent(f"import {module}")
+        problem = verifier.validate_code(code, frozenset({
+            "socket", "subprocess", "urllib", "http", "ssl", "asyncio", "shutil", "ctypes",
+            "requests",
+        }))
+        assert problem is not None and module.split(".")[0] in problem, module
+
+
+def test_manifest_cannot_declare_socket_or_subprocess(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("socket\nsubprocess\nrequests\nshutil\n")
+    assert verifier.declared_network_modules(tmp_path) == frozenset({"requests"})
+
+
+def test_verify_passes_the_repos_declared_deps(
+    vrepo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The branch declares requests; main's checkout does not. The call site
+    still passes that set into validate_code, and the test is allowed to run."""
+    _git(vrepo, "checkout", "-q", "feat/scale")
+    (vrepo / "requirements.txt").write_text("requests\npydantic\nsocket\nsubprocess\n")
+    _git(vrepo, "add", "requirements.txt")
+    _git(vrepo, "commit", "-qm", "declare requests")
+    _git(vrepo, "checkout", "-q", "main")
+    assert not (vrepo / "requirements.txt").exists()
+
+    seen: list[frozenset[str]] = []
+    real = verifier.validate_code
+
+    def spy(code: str, allowed_modules: frozenset[str] = frozenset()) -> str | None:
+        seen.append(frozenset(allowed_modules))
+        return real(code, allowed_modules)
+
+    monkeypatch.setattr(verifier, "validate_code", spy)
+    monkeypatch.setattr(settings, "verify_max_attempts", 1)
+    code = GOOD_TEST.replace("import calc\n", "import calc\nimport requests\n", 1)
+    monkeypatch.setattr("app.services.nemotron.complete", _scripted([code], []))
+    result = verifier.verify_pair(vrepo, "main", _pair(), use_cache=False)
+
+    assert seen == [frozenset({"requests"})]
+    assert result.status == "confirmed", result.reason
+    assert result.runs[0].passed == 1, result.runs[0].output
+
+
+def test_verify_still_rejects_undeclared_requests(
+    vrepo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "verify_max_attempts", 1)
+    code = GOOD_TEST.replace("import calc\n", "import calc\nimport requests\n", 1)
+    monkeypatch.setattr("app.services.nemotron.complete", _scripted([code], []))
+    result = verifier.verify_pair(vrepo, "main", _pair(), use_cache=False)
+    assert result.status == "error"
+    assert result.reason == "generated test imports forbidden module requests"
+    assert result.runs == []
+
+
+def test_requests_get_is_blocked_by_the_socket_guard(tmp_path: Path) -> None:
+    """requests is importable here, and connect/getaddrinfo are patched, so
+    the call fails in-process. No mock and no real network."""
+    body = (
+        "import requests\n\n\n"
+        "def test_branch_net():\n"
+        "    try:\n"
+        "        requests.get('http://example.com', timeout=2)\n"
+        "    except Exception as exc:\n"
+        "        text = str(exc)\n"
+        "        cause = exc.__cause__\n"
+        "        seen = set()\n"
+        "        while cause is not None and id(cause) not in seen:\n"
+        "            seen.add(id(cause))\n"
+        "            text += ' ' + str(cause)\n"
+        "            cause = cause.__cause__\n"
+        "        assert 'network disabled by the MergeGuard verify sandbox' in text, text\n"
+        "    else:\n"
+        "        raise AssertionError('request was not blocked')\n"
+    )
+    run = _raw_run(tmp_path, body)
+    assert run.exit_code == 0 and run.passed == 1, run.output

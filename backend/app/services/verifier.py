@@ -25,12 +25,16 @@ Safety: only for local repos under the allowed roots (default: the bundled
 ``demo/`` folder); never for repos cloned from a URL. The test subprocess gets
 a minimal environment (no API keys or other secrets), a timeout, and no
 network (macOS ``sandbox-exec`` deny-network profile when available, plus an
-in-process socket guard everywhere). Generated code that imports network,
-process or filesystem-mutation modules is rejected before it runs.
+in-process socket guard everywhere). Generated code that imports low-level
+network, process or filesystem-mutation modules is rejected before it runs.
+``requests``, ``httpx``, ``aiohttp`` and ``urllib3`` may be imported only when
+the repository declares that dependency; the socket guard still blocks every
+connection those libraries try to open.
 """
 from __future__ import annotations
 
 import ast
+import configparser
 import json
 import os
 import re
@@ -40,6 +44,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,11 +65,29 @@ SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 # Repo root of MergeGuard itself: backend/app/services/verifier.py -> parents[3].
 DEMO_ROOT = Path(__file__).resolve().parents[3] / "demo"
 
-_FORBIDDEN_MODULES = {
-    "socket", "subprocess", "requests", "urllib", "urllib2", "urllib3", "http",
-    "httpx", "aiohttp", "ftplib", "smtplib", "telnetlib", "ssl", "shutil",
+# Low-level modules stay forbidden even if a manifest names them. Importing
+# one is a sandbox escape (raw sockets, processes, filesystem mutation), not a
+# test of the project.
+_ALWAYS_FORBIDDEN_MODULES = {
+    "socket", "subprocess", "urllib", "urllib2", "http",
+    "ftplib", "smtplib", "telnetlib", "ssl", "shutil",
     "ctypes", "multiprocessing", "asyncio", "pty", "signal", "webbrowser",
 }
+# PEP 503 distribution name -> import name. These may be imported only when
+# the repo declares the distribution. Runtime network stays blocked by the
+# socket guard / sandbox-exec, because each of these libs opens a socket.
+_DECLARED_CLIENT_IMPORTS = {
+    "requests": "requests",
+    "httpx": "httpx",
+    "aiohttp": "aiohttp",
+    "urllib3": "urllib3",
+}
+_NETWORK_CLIENT_MODULES = frozenset(_DECLARED_CLIENT_IMPORTS.values())
+_MAX_MANIFEST_CHARS = 1_000_000
+_ROOT_MANIFESTS = {"pyproject.toml", "setup.cfg", "setup.py", "pipfile"}
+_REQ_NAME_RE = re.compile(
+    r"^\s*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9])\b"
+)
 _FORBIDDEN_CALLS = {"eval", "exec", "compile", "__import__", "open", "input", "breakpoint"}
 _FORBIDDEN_ATTRS = {"system", "popen", "spawnl", "spawnv", "execv", "execve", "fork", "remove",
                     "unlink", "rmdir", "rmtree", "kill", "putenv", "environ", "getenv"}
@@ -327,8 +350,348 @@ def extract_code(text: str) -> str:
     return cleaned.strip() + "\n"
 
 
-def validate_code(code: str) -> str | None:
-    """Return a problem description, or ``None`` if the test may run."""
+def _normalize_dist_name(name: str) -> str:
+    """PEP 503: lowercase, and collapse runs of ``-``, ``_`` and ``.`` to one ``-``."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _is_manifest_path(path: str) -> bool:
+    """Root dependency files, ``requirements*.txt``, and ``requirements/*.txt``."""
+    parts = path.replace("\\", "/").split("/")
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return False
+    name = parts[-1].lower()
+    if len(parts) == 1:
+        if name in _ROOT_MANIFESTS:
+            return True
+        return name.startswith("requirements") and name.endswith(".txt")
+    return len(parts) == 2 and parts[0].lower() == "requirements" and name.endswith(".txt")
+
+
+def _read_manifest(root: Path, path: Path) -> str | None:
+    """File text, or ``None`` if it is unreadable, huge, or outside ``root``."""
+    try:
+        resolved_root = root.resolve()
+        resolved = path.resolve()
+    except OSError:
+        return None
+    if not resolved.is_file():
+        return None
+    if resolved != resolved_root and resolved_root not in resolved.parents:
+        return None
+    try:
+        if resolved.stat().st_size > _MAX_MANIFEST_CHARS:
+            return None
+        return resolved.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _worktree_manifests(root: Path) -> list[tuple[str, str]]:
+    if not root.is_dir():
+        return []
+    found: list[tuple[str, str]] = []
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return []
+    for path in entries:
+        rel = path.name
+        if not _is_manifest_path(rel):
+            continue
+        text = _read_manifest(root, path)
+        if text is not None:
+            found.append((rel, text))
+    req_dir = root / "requirements"
+    try:
+        req_entries = list(req_dir.iterdir()) if req_dir.is_dir() else []
+    except OSError:
+        req_entries = []
+    for path in req_entries:
+        rel = f"requirements/{path.name}"
+        if not _is_manifest_path(rel):
+            continue
+        text = _read_manifest(root, path)
+        if text is not None:
+            found.append((rel, text))
+    return found
+
+
+def _git_manifests(repo: Path, ref: str) -> list[tuple[str, str]]:
+    try:
+        listing = git_service._run(repo, "ls-tree", "-r", "--name-only", ref)
+    except git_service.GitError:
+        return []
+    found: list[tuple[str, str]] = []
+    for path in listing.splitlines():
+        if not _is_manifest_path(path):
+            continue
+        text = git_service.show_file(repo, ref, path)
+        if text is None or len(text) > _MAX_MANIFEST_CHARS:
+            continue
+        found.append((path, text))
+    return found
+
+
+def _split_req_items(text: str) -> list[str]:
+    """Requirement lines, splitting commas that are not inside extras."""
+    items: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        if "#" in line:
+            hash_at = line.find("#")
+            if "://" not in line[:hash_at]:
+                line = line[:hash_at].strip()
+        if not line:
+            continue
+        line = line.split(";", 1)[0].strip()
+        buf: list[str] = []
+        depth = 0
+        for ch in line:
+            if ch == "[":
+                depth += 1
+                buf.append(ch)
+            elif ch == "]":
+                depth = max(0, depth - 1)
+                buf.append(ch)
+            elif ch == "," and depth == 0:
+                items.append("".join(buf).strip())
+                buf = []
+            else:
+                buf.append(ch)
+        item = "".join(buf).strip()
+        if item:
+            items.append(item)
+    return items
+
+
+def _requirement_name(spec: str) -> str | None:
+    """Distribution name at the start of a PEP 508 requirement, or ``None``."""
+    text = spec.strip()
+    if not text or text[0] in "#-./":
+        return None
+    text = text.split(";", 1)[0].strip()
+    match = _REQ_NAME_RE.match(text)
+    if not match:
+        return None
+    name = match.group(1)
+    if name.lower() in {"http", "https", "git", "file", "ssh"}:
+        return None
+    return name
+
+
+def _names_from_requirements(text: str) -> set[str]:
+    names: set[str] = set()
+    for item in _split_req_items(text):
+        name = _requirement_name(item)
+        if name:
+            names.add(name)
+    return names
+
+
+def _names_from_pyproject(text: str) -> set[str]:
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    names: set[str] = set()
+    project = data.get("project")
+    if isinstance(project, dict):
+        deps = project.get("dependencies")
+        if isinstance(deps, list):
+            for item in deps:
+                if isinstance(item, str):
+                    name = _requirement_name(item)
+                    if name:
+                        names.add(name)
+        optional = project.get("optional-dependencies")
+        if isinstance(optional, dict):
+            for group in optional.values():
+                if not isinstance(group, list):
+                    continue
+                for item in group:
+                    if isinstance(item, str):
+                        name = _requirement_name(item)
+                        if name:
+                            names.add(name)
+    tool = data.get("tool")
+    poetry = tool.get("poetry") if isinstance(tool, dict) else None
+    poetry_deps = poetry.get("dependencies") if isinstance(poetry, dict) else None
+    if isinstance(poetry_deps, dict):
+        for key in poetry_deps:
+            if isinstance(key, str) and key.strip():
+                names.add(key.strip())
+    return names
+
+
+def _names_from_setup_cfg(text: str) -> set[str]:
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read_string(text)
+    except configparser.Error:
+        return set()
+    if not parser.has_section("options") or not parser.has_option("options", "install_requires"):
+        return set()
+    return _names_from_requirements(parser.get("options", "install_requires"))
+
+
+def _quoted_strings(body: str) -> list[str]:
+    out: list[str] = []
+    index = 0
+    length = len(body)
+    while index < length:
+        if body[index] not in {"'", '"'}:
+            index += 1
+            continue
+        quote = body[index]
+        index += 1
+        chars: list[str] = []
+        closed = False
+        while index < length:
+            ch = body[index]
+            index += 1
+            if ch == "\\":
+                if index >= length:
+                    break
+                escaped = body[index]
+                index += 1
+                chars.append({"n": "\n", "t": "\t"}.get(escaped, escaped))
+                continue
+            if ch == quote:
+                closed = True
+                break
+            chars.append(ch)
+        if closed:
+            out.append("".join(chars))
+    return out
+
+
+def _bracket_list(text: str, open_at: int) -> str | None:
+    """Contents of the list that opens at ``open_at``, respecting quotes."""
+    if open_at >= len(text) or text[open_at] != "[":
+        return None
+    depth = 0
+    quote: str | None = None
+    escape = False
+    for index in range(open_at, len(text)):
+        ch = text[index]
+        if quote is not None:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1:index]
+    return None
+
+
+def _names_from_setup_py(text: str) -> set[str]:
+    """Quoted strings inside ``install_requires=[...]``. The file is not executed."""
+    names: set[str] = set()
+    for match in re.finditer(r"install_requires\s*=\s*\[", text):
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        if text[line_start:match.start()].lstrip().startswith("#"):
+            continue
+        body = _bracket_list(text, match.end() - 1)
+        if body is None:
+            continue
+        for spec in _quoted_strings(body):
+            name = _requirement_name(spec)
+            if name:
+                names.add(name)
+    return names
+
+
+def _names_from_pipfile(text: str) -> set[str]:
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return set()
+    packages = data.get("packages") if isinstance(data, dict) else None
+    if not isinstance(packages, dict):
+        return set()
+    return {key.strip() for key in packages if isinstance(key, str) and key.strip()}
+
+
+def _names_from_manifest(path: str, text: str) -> set[str]:
+    name = Path(path).name.lower()
+    try:
+        if name == "pyproject.toml":
+            return _names_from_pyproject(text)
+        if name == "setup.cfg":
+            return _names_from_setup_cfg(text)
+        if name == "setup.py":
+            return _names_from_setup_py(text)
+        if name == "pipfile":
+            return _names_from_pipfile(text)
+        if name.endswith(".txt"):
+            return _names_from_requirements(text)
+    except Exception:
+        return set()
+    return set()
+
+
+def declared_network_modules(repo: Path, ref: str | None = None) -> frozenset[str]:
+    """Import names of network client libs declared by ``repo``.
+
+    With ``ref``, read manifests from that git tree. Without it, ``repo`` is
+    the checkout or worktree on disk. A manifest that cannot be read or parsed
+    contributes nothing (fail closed). Only ``requests``, ``httpx``,
+    ``aiohttp`` and ``urllib3`` are returned, under their import names.
+    """
+    try:
+        manifests = _git_manifests(repo, ref) if ref is not None else _worktree_manifests(repo)
+    except Exception:
+        return frozenset()
+    modules: set[str] = set()
+    for path, text in manifests:
+        for dist in _names_from_manifest(path, text):
+            mapped = _DECLARED_CLIENT_IMPORTS.get(_normalize_dist_name(dist))
+            if mapped:
+                modules.add(mapped)
+    return frozenset(modules)
+
+
+def _allowed_test_modules(
+    repo: Path,
+    *refs: str,
+    worktrees: list[Path] | None = None,
+) -> frozenset[str]:
+    """Network client imports allowed for a generated test of this repo."""
+    found: set[str] = set(declared_network_modules(repo))
+    for ref in refs:
+        found |= declared_network_modules(repo, ref)
+    for path in worktrees or ():
+        found |= declared_network_modules(path)
+    return frozenset(found)
+
+
+def _import_forbidden(top: str, allowed_modules: frozenset[str]) -> bool:
+    if top in _ALWAYS_FORBIDDEN_MODULES:
+        return True
+    return top in _NETWORK_CLIENT_MODULES and top not in allowed_modules
+
+
+def validate_code(code: str, allowed_modules: frozenset[str] = frozenset()) -> str | None:
+    """Return a problem description, or ``None`` if the test may run.
+
+    ``allowed_modules`` lists network-client import names the repo declares
+    (``requests``, ``httpx``, ``aiohttp``, ``urllib3``). The default is empty,
+    so those imports are rejected. Low-level modules stay forbidden either way.
+    """
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
@@ -341,10 +704,10 @@ def validate_code(code: str) -> str | None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.split(".")[0] in _FORBIDDEN_MODULES:
+                if _import_forbidden(alias.name.split(".")[0], allowed_modules):
                     return f"generated test imports forbidden module {alias.name}"
         elif isinstance(node, ast.ImportFrom):
-            if node.module and node.module.split(".")[0] in _FORBIDDEN_MODULES:
+            if node.module and _import_forbidden(node.module.split(".")[0], allowed_modules):
                 return f"generated test imports forbidden module {node.module}"
         elif isinstance(node, ast.Call):
             func = node.func
@@ -1010,6 +1373,9 @@ def verify_pair(
     try:
         sha_base = git_service.merge_base(repo, sha_a, sha_b) or git_service.rev_parse(repo, base)
         with _Worktrees(repo, sha_a, sha_b, sha_base) as wt:
+            allowed_modules = _allowed_test_modules(
+                repo, base, pair.branch_a, pair.branch_b, worktrees=list(wt.paths.values()),
+            )
             next_prompt = prompt
             while True:
                 if code is None:
@@ -1034,7 +1400,7 @@ def verify_pair(
                     tokens[0] += gen.prompt_tokens
                     tokens[1] += gen.completion_tokens
                     code = gen.code
-                problem = validate_code(code)
+                problem = validate_code(code, allowed_modules)
                 if problem:
                     if cached_test or attempts >= max_attempts:
                         if last_code is not None:

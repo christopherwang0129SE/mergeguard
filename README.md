@@ -368,8 +368,11 @@ Safety:
   `VERIFY_TIMEOUT_SECONDS` (default 30) per run with the whole process group
   killed on timeout, and no network: macOS `sandbox-exec` (deny network, writes
   only in the temp dir) when available, plus an in-process socket guard.
-- Generated code importing network/process modules or calling `open`, `eval`,
-  `exec`, `os.system` and similar is rejected before it runs.
+- Generated code that imports low-level network or process modules (`socket`,
+  `subprocess`, `urllib`, and the like) or that calls `open`, `eval`, `exec`,
+  `os.system` and similar is rejected before it runs. `requests`, `httpx`,
+  `aiohttp`, and `urllib3` are allowed only when the repository declares that
+  dependency. The socket guard still blocks the connection.
 - Send `"verify": false` to skip it for a request.
 
 ## Real-world case

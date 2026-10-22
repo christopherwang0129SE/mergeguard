@@ -1,0 +1,24 @@
+case_id,hand_label,note
+psf__requests-a17fdf62-6541ceb5,unrelated,"2nd check: F is a merge whose only conflict was a README badge line (textual, docs); models.py change just came from the merged side; no A x B semantic break"
+psf__requests-0af19a05-a5cb6355,unsure,F 'chardet fixes!' touches compat.py from both; could be either side alone
+psf__requests-1e64fbcb-27c6dc37,unrelated,"F fixes issue #1027 (always persist cookies), not caused by A+B"
+psf__requests-ed559bb8-3bf46609,unsure,F #1127 one-line fix for #1126 in models.py; cause unclear
+psf__requests-6a2eea8b-bd6b981d,unrelated,"2nd check: missing ')' was introduced by 325ea7b7 'Use session defaults', which is inside B alone; B was broken by itself"
+psf__requests-f723ab53-386c589b,unrelated,2nd check: e.message bug from a single earlier commit; Python 3 bug independent of A x B
+fastapi__fastapi-c2c6049b-b51ec36f,unrelated,"F #11194 File-after-Form validation bug, independent"
+fastapi__fastapi-7fbd3046-d68c0662,unrelated,"F #14303 Form list parsing, independent follow-up"
+fastapi__fastapi-d68c0662-6cf40df2,unrelated,F #14356 generalizes #14303 to non-body params
+fastapi__fastapi-6cf40df2-de5bec63,unrelated,"F #14360 alias bug, independent"
+fastapi__fastapi-8f99a2b7-0f613d90,unrelated,"F #13207 computed fields schema, independent"
+fastapi__fastapi-0f613d90-f95a1742,unrelated,"F #14430 PEP604 optional sequences, independent"
+fastapi__fastapi-73c411e1-98244866,interaction,F #14448 'Fix support for functools wraps and partial combined' = A (#9555 wrapped deps) x B (#9753 partial)
+fastapi__fastapi-f3f49810-41352de2,unrelated,"F #14789 PEP 649 annotations, independent"
+fastapi__fastapi-b49435be-97145588,unrelated,"F #14616 Json[list[str]], independent"
+fastapi__fastapi-ad03e117-d6537f77,unsure,F #15937 status_code ignored for streaming; B changed response params for non-generator endpoints
+fastapi__fastapi-fab6eeac-6a506999,unrelated,"F #16523 boolean form fields, independent"
+sindresorhus__ky-8481f5b4-a7c71b57,unrelated,2nd check: F changes B's searchParams typing/message/tests only; A not involved
+sindresorhus__ky-2d8d68ae-eefcde50,unsure,F #335 searchParams merge after TS migration (A) and #334 (B)
+sindresorhus__ky-db4247be-0017053e,unrelated,"F #613 Request-object signal handling, independent"
+sindresorhus__ky-019e10ee-2b0a1007,unrelated,"F #755 URLSearchParams merging, independent"
+sindresorhus__ky-f37e82cd-6edddd98,unrelated,"F #867 retry limit merge, independent"
+sindresorhus__ky-c426f195-294fe63b,unrelated,"F #880 signal on extend, independent"

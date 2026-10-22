@@ -1,5 +1,7 @@
 # Hosted demo
 
+The click-ready list for Dima (hosting) is [DEPLOY_CHECKLIST.md](DEPLOY_CHECKLIST.md): approval gate, Railway Free and Hobby numbers, variables, smoke test, and how to turn it off. Nothing in either file creates a project or spends money.
+
 The public demo is two projects, both named `mergeguard-demo`.
 
 - Vercel serves the Vite dashboard from `frontend/`.
@@ -27,7 +29,7 @@ The process listens on `0.0.0.0` and `${PORT:-8000}`. Railway injects `PORT`.
 
 ## Railway
 
-1. Create a project named `mergeguard-demo` on the Hobby plan.
+1. Create a project named `mergeguard-demo`. Stay on the Free plan unless a paid plan was approved. Hobby is the paid plan. Numbers are in the cost section and in [DEPLOY_CHECKLIST.md](DEPLOY_CHECKLIST.md).
 2. Add a service from this GitHub repository. Use the branch that contains the Dockerfile. Root directory is the repository root. Builder is Dockerfile (`railway.json` sets this, plus healthcheck `/api/health`, restart policy `ON_FAILURE` with 10 retries, and `sleepApplication`).
 3. `railway.json` enables Serverless (the setting Railway used to call app sleeping). You can confirm it under the service's Settings, Deploy, Serverless. A slept service accrues no compute. Railway sleeps it after several minutes with no outbound traffic (their docs describe about 10 minutes). This API does not poll or hold a database connection, so an idle demo can sleep. The first request after sleep may take a few seconds and may return 502 while the container starts. Retry that request. A new deploy is required before a sleep change applies to the running container.
 4. Generate a public HTTPS domain under the service networking settings. Generated domains look like `https://<name>.up.railway.app`. Copy that origin with no path and no trailing slash. That value is `VITE_API_BASE_URL` on Vercel.
@@ -35,7 +37,7 @@ The process listens on `0.0.0.0` and `${PORT:-8000}`. Railway injects `PORT`.
 
 | Variable | Value |
 | --- | --- |
-| `NEBIUS_API_KEY` | Token Factory key. Empty keeps git-only scores. |
+| `NEBIUS_API_KEY` | Dedicated low-balance Token Factory key. Never the dev key. Empty keeps git-only scores. |
 | `TAVILY_API_KEY` | Tavily key. Empty skips library-doc lookup. The API demo is the one that searches. |
 | `DEMO_MODE` | `true`. Also the image default. `POST /api/analyze` then accepts only `/app/demo/checkout-demo` and `/app/demo/api-demo`. A `repo_url`, or any other path, returns 403 and is not cloned. |
 | `CORS_ALLOW_ORIGINS` | The Vercel origin, for example `https://mergeguard-demo.vercel.app`. Comma-separated if you have more than one. No trailing slash. |
@@ -46,19 +48,22 @@ Leave `GITHUB_REPOSITORY`, `GITHUB_TOKEN`, and `GITHUB_SEATED_USERS` unset. The 
 
 CORS is read when the process starts. Change the variables, then redeploy.
 
-Start with a 512 MB memory limit in the service settings. The bundled repos are small. Raise it if the deploy is killed while verify-by-test or branch tests run. You do not need a large vCPU reservation for a demo.
+Set a 512 MB memory limit in the service settings. That is the Free plan maximum (1 vCPU and 0.5 GB RAM per service). Measured locally on this branch, the demo-mode API idles near 75 MB RSS, and both bundled demos finish branch tests in a few seconds with no API keys. On Hobby you can raise memory if a deploy is killed during verify-by-test or branch tests. You do not need a large vCPU reservation for a demo. Free will not accept a limit above 0.5 GB or 1 vCPU.
 
 ### Cost
 
-Hobby is $5 per month and includes $5 of usage. Past that, Railway meters the resources:
+Published Railway prices as of October 2026:
 
-- RAM: $10 per GB-month
-- CPU: $20 per vCPU-month
-- Egress: $0.05 per GB
+| Plan | Subscription | Included usage | Caps and meter |
+| --- | --- | --- | --- |
+| Free | $0 | $1/month | Max 1 vCPU and 0.5 GB RAM per service. App sleeping. |
+| Hobby | $5/month | $5 of usage | Past the included $5: RAM $10/GB-month, CPU $20/vCPU-month, egress $0.05/GB. |
 
-A service held at 0.5 GB around the clock is about $5 of RAM before CPU, which spends the included credit on its own. Sleeping is what keeps a quiet demo inside that credit. Set a workspace usage limit so a busy day cannot run the bill up. Egress for this demo is the JSON the dashboard fetches, plus Tavily and Token Factory calls when keys are set. Those two vendors bill separately from Railway.
+Those resource rates apply on both plans. A service held at 0.5 GB around the clock is about $5 of RAM before CPU. That spends the Hobby credit on its own. It is also well above Free's $1 credit, so an always-on service does not fit Free. Sleeping is what keeps a quiet demo inside either credit. In Workspace Settings → Usage, set a hard usage limit and an email alert before the service is public. A limit of $5 matches Hobby's included usage. On Free the included credit is $1, so a higher limit is a spending-limit change and needs approval. Egress for this demo is the JSON the dashboard fetches. Tavily and Token Factory bill separately from Railway. Token Factory is prepaid: the cap is the balance on a dedicated key. Tavily draws its own free-tier credits.
 
 ## Vercel
+
+The Hobby plan is free for non-commercial use. Put no secrets on Vercel. Spend Management does not apply on Hobby.
 
 1. Create a project named `mergeguard-demo`. Import this repository.
 2. Set the root directory to `frontend`. Framework preset Vite. `frontend/vercel.json` sets the framework, `npm run build`, output `dist`, and an SPA rewrite to `/index.html`. Vercel serves files that exist (the JS and CSS bundles) and rewrites other paths to `index.html`.
