@@ -105,6 +105,33 @@ def test_confusion_zero_division() -> None:
     assert mixed["precision"] == mixed["recall"] == mixed["specificity"] == mixed["f1"] == 0.5
 
 
+def test_textual_conflicts_are_counted_separately() -> None:
+    new_conflict = _row("new-conflict", level="high", flagged=True)
+    new_conflict["finding"] = "textual_conflict"
+    old_conflict = _row("old-conflict", level="high", flagged=True)
+    old_conflict["textual_conflict"] = True
+    semantic = _row("semantic", level="high", flagged=True)
+    semantic["finding"] = "semantic"
+    semantic["textual_conflict"] = True
+    clean = _row("clean-old", level="low", flagged=False)
+    derived = _row("derived", level="high", include_flags=False)
+    derived["finding"] = "textual_conflict"
+    rows = [new_conflict, old_conflict, semantic, clean]
+
+    assert is_flagged(new_conflict) is False
+    assert is_flagged(old_conflict) is True
+    assert is_flagged(semantic) is True
+    assert "finding" not in _row("legacy", level="high", include_flags=False)
+    assert is_flagged(_row("legacy", level="high", include_flags=False)) is True
+    assert is_flagged(derived) is False
+
+    summary = build_summary(rows, {})
+    assert summary["n_textual_conflicts"] == 2
+    assert summary["n_flagged"] == 2
+    text = report_mod.render_markdown(summary)
+    assert "2 textual conflicts (separate category)." in text
+
+
 def test_flag_derivation_when_booleans_absent() -> None:
     high = _row("h", level="high", include_flags=False)
     assert is_flagged(high) is True

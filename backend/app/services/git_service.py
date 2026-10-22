@@ -162,6 +162,28 @@ def merge_base(repo: Path, a: str, b: str) -> str | None:
         return None
 
 
+def textual_conflict(repo: Path, a: str, b: str) -> bool | None:
+    """Whether ``git merge-tree --write-tree`` reports a conflict.
+
+    True when git exits non-zero and the output contains ``CONFLICT``.
+    False when the merge exits 0. None when git fails for any other reason
+    (missing ref, or a git without ``--write-tree``). Never raises.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "merge-tree", "--write-tree", a, b],
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    if proc.returncode == 0:
+        return False
+    if "CONFLICT" in f"{proc.stdout or ''}{proc.stderr or ''}":
+        return True
+    return None
+
+
 def _parse_numstat(text: str) -> dict[str, tuple[int, int]]:
     """path -> (added, removed). Binary files report '-'."""
     stats: dict[str, tuple[int, int]] = {}

@@ -7,7 +7,8 @@
 ``main`` is ``a.parent``. Each change is applied onto ``main``: merge commits
 via ``git diff <parent> <sha> | git apply --3way`` (fallback ``cherry-pick -m 1``),
 squash/direct via ``git cherry-pick``. If that fails and ``pr`` is an int on an
-owner repo, the branch is the fetched PR head; otherwise it is omitted.
+owner repo, the branch is the fetched PR head, unless that head contains
+commit A or has no diff against ``main``. Otherwise the branch is omitted.
 
 Replays depend on the src clone via ``.git/objects/info/alternates``.
 """
@@ -143,7 +144,21 @@ def fetch_pr_head(src_repo: Path, pr: int, *, timeout: int = 120) -> str | None:
     return _commit_sha(src_repo, ref) if proc.returncode == 0 else None
 
 
-def _at_pr_head(replay: Path, src: Path, branch: str, sha: str, pr: int) -> bool:
+def _same_as_main(repo: Path, rev: str) -> bool:
+    return _git(repo, "diff", "--quiet", "main", rev, check=False).returncode == 0
+
+
+def _head_contains_a(repo: Path, a_sha: object, head: str) -> bool:
+    sha = a_sha.strip() if isinstance(a_sha, str) else ""
+    # Unknown in this repo: skip the ancestor check rather than reject the head.
+    if not sha or _commit_sha(repo, sha) is None:
+        return False
+    return _git(repo, "merge-base", "--is-ancestor", sha, head, check=False).returncode == 0
+
+
+def _at_pr_head(
+    replay: Path, src: Path, branch: str, sha: str, pr: int, *, a_sha: str | None = None,
+) -> bool:
     if _commit_sha(replay, sha) is None:
         ref = f"refs/bench/pr/{pr}"
         try:
@@ -154,6 +169,9 @@ def _at_pr_head(replay: Path, src: Path, branch: str, sha: str, pr: int) -> bool
             return False
     base = _git(replay, "merge-base", "main", sha, check=False)
     if base.returncode != 0 or not base.stdout.strip():
+        return False
+    # A PR head that already contains A, or that matches main, is not a parallel change.
+    if _head_contains_a(replay, a_sha, sha) or _same_as_main(replay, sha):
         return False
     return _git(replay, "branch", "-f", branch, sha, check=False).returncode == 0
 
@@ -167,7 +185,10 @@ def _place(replay: Path, src: Path, case: dict, change: dict, branch: str, fetch
         sha = str(fetch(src, pr) or "").strip()
     except (subprocess.TimeoutExpired, OSError):
         return None
-    return "pr-head" if sha and _at_pr_head(replay, src, branch, sha, pr) else None
+    a_sha = case["a"]["sha"]
+    return "pr-head" if sha and _at_pr_head(
+        replay, src, branch, sha, pr, a_sha=None if a_sha is None else str(a_sha),
+    ) else None
 
 
 def _recall(repo: Path) -> tuple[str | None, str | None]:
@@ -191,6 +212,8 @@ def _meta(repo: Path) -> dict:
         "path": str(repo), "main": _branch(repo, "main"), "a": a, "b": b,
         "a_apply_failed": a is None, "b_apply_failed": b is None, "textual_conflict": conflict,
         "a_method": a_method if a else None, "b_method": b_method if b else None,
+        "a_empty": a is not None and _same_as_main(repo, "a"),
+        "b_empty": b is not None and _same_as_main(repo, "b"),
     }
 
 

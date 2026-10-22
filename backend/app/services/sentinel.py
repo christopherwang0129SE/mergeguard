@@ -24,9 +24,22 @@ search error leaves those prompts unchanged.
 When Nebius is configured (``NEBIUS_API_KEY`` set and ``NEBIUS_ENABLED``), the
 selected pairs are sent to NVIDIA Nemotron. The published score is an equal blend of the git
 score and the model's ``risk_score``. If the hunks overlap, the blend cannot
-fall below the git score: the model may raise a textual collision, not dismiss
-it. When they do not overlap, the blend can move either way so a semantic clash
-the diff heuristic missed can still raise the score.
+fall below the git score unless ``git merge-tree`` merged cleanly
+(``textual_conflict`` is false): the model may raise a real textual collision,
+not dismiss it. A clean merge uses the plain 0.5/0.5 blend. When hunks do not
+overlap, the blend can move either way so a semantic clash the diff heuristic
+missed can still raise the score. The floor also stays when merge-tree errors
+(``textual_conflict`` is unknown).
+
+A clean merge is published as high only when the model itself said high
+(``score_source == "model"`` and ``model_level == "high"``). Otherwise the
+score is capped at 69, so the level is at most medium, and ``score_note``
+says why when that cap changed the score. The cap runs after verify-by-test.
+``is_high_risk`` reads the level and the score, and ``verify_min_score`` is
+70, so capping first would drop pairs whose blend cleared 70 only because
+the git score lifted a lower model assessment. A verification that already
+confirmed is left alone. Branch tests run after the cap and still raise a
+confirmed pair.
 
 If the key is missing, the model is disabled, the call errors or times out, or
 the reply is not a usable JSON assessment, that pair keeps the git score and
@@ -35,8 +48,10 @@ the reply is not a usable JSON assessment, that pair keeps the git score and
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable, Sequence
 from itertools import combinations
 from pathlib import Path
+from typing import Literal
 
 from app.config import settings
 from app.schemas import (
@@ -62,6 +77,7 @@ from app.services import (
     prefilter,
     verifier,
 )
+from app.services.config_paths import is_config_path as _is_config_path
 from app.services.nemotron import (
     NemotronError,
     build_pair_prompt,
@@ -103,10 +119,20 @@ def _level(score: float) -> RiskLevel:
     return "none"
 
 
-def combine_scores(git_score: float, model_score: float, overlapping_files: int) -> float:
-    """Blend the git hunk score with the model score. See the module docstring."""
+def combine_scores(
+    git_score: float,
+    model_score: float,
+    overlapping_files: int,
+    *,
+    textual_conflict: bool | None = None,
+) -> float:
+    """Blend the git hunk score with the model score.
+
+    Overlapping hunks floor the blend at ``git_score`` unless git merged
+    cleanly (``textual_conflict is False``). Unknown (``None``) keeps the floor.
+    """
     blended = (0.5 * git_score) + (0.5 * model_score)
-    if overlapping_files > 0:
+    if overlapping_files > 0 and textual_conflict is not False:
         blended = max(git_score, blended)
     blended = min(max(blended, 0.0), 100.0)
     return round(blended, 1)
@@ -177,13 +203,147 @@ def _commits(repo: Path, branch: str) -> list[str]:
         return []
 
 
-def _excerpt(repo: Path, base_branch: str, pair: PairRisk) -> str:
-    paths = [c.path for c in pair.collisions if c.overlapping] or [
-        c.path for c in pair.collisions
+_DOC_SUFFIXES = frozenset({".md", ".rst", ".txt"})
+# A path with none of these suffixes is non-code, so it counts as test data
+# unless it is config or docs. ``tests/**/data/`` is test data even when the
+# file itself is code.
+_CODE_SUFFIXES = frozenset({
+    ".py", ".pyi", ".pyx",
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
+    ".go", ".rs", ".java", ".kt", ".kts", ".scala",
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp",
+    ".cs", ".swift", ".m", ".mm",
+    ".rb", ".php", ".lua", ".pl", ".pm",
+    ".ex", ".exs", ".erl", ".hs", ".ml", ".mli",
+    ".clj", ".cljs", ".dart",
+    ".vue", ".svelte",
+    ".sh", ".bash", ".zsh", ".ps1",
+    ".sql",
+    ".css", ".scss", ".sass", ".less",
+    ".html", ".htm",
+    ".graphql", ".gql", ".proto",
+})
+_EXCERPT_PATH_LIMIT = 3
+_PathKind = Literal["config", "docs", "test_data", "source"]
+
+
+def _path_parts(path: str) -> list[str]:
+    return [part for part in path.replace("\\", "/").split("/") if part not in {"", "."}]
+
+
+def _basename(path: str) -> str:
+    parts = _path_parts(path)
+    return parts[-1] if parts else ""
+
+
+def _is_docs_path(path: str) -> bool:
+    parts = _path_parts(path)
+    if not parts:
+        return False
+    if Path(parts[-1]).suffix.lower() in _DOC_SUFFIXES:
+        return True
+    return any(part.lower() == "docs" for part in parts[:-1])
+
+
+def _is_under_tests_data(path: str) -> bool:
+    parts = [part.lower() for part in _path_parts(path)]
+    for index, part in enumerate(parts[:-1]):
+        if part == "tests" and "data" in parts[index + 1 : -1]:
+            return True
+    return False
+
+
+def _path_kind(path: str) -> _PathKind:
+    """Source is everything that is not config, docs/changelog, or test data."""
+    if _is_config_path(path):
+        return "config"
+    if _is_docs_path(path):
+        return "docs"
+    suffix = Path(_basename(path)).suffix.lower()
+    if _is_under_tests_data(path) or suffix not in _CODE_SUFFIXES:
+        return "test_data"
+    return "source"
+
+
+def _unique_paths(files: Iterable[ChangedFile | str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in files:
+        path = item if isinstance(item, str) else item.path
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
+def _extend_unique(selected: list[str], seen: set[str], paths: Iterable[str]) -> None:
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        selected.append(path)
+        if len(selected) >= _EXCERPT_PATH_LIMIT:
+            return
+
+
+def _shared_of(shared: Sequence[str], overlapping: set[str], kind: _PathKind) -> list[str]:
+    chosen = [path for path in shared if _path_kind(path) == kind]
+    return [path for path in chosen if path in overlapping] + [
+        path for path in chosen if path not in overlapping
     ]
-    # No shared file: show the files the prefilter's symbol evidence names
-    # (the changed definition and its caller in the other branch).
-    paths = (paths or verifier.focus_paths(pair.symbol_evidence))[:3]
+
+
+def _excerpt_paths(
+    pair: PairRisk,
+    files_a: Iterable[ChangedFile | str],
+    files_b: Iterable[ChangedFile | str],
+) -> list[str]:
+    """Up to three diff paths, highest priority first.
+
+    Shared source (overlapping hunks first), then prefilter focus paths, then
+    config either branch changed. Docs, changelogs and test data are included
+    only when none of those exist.
+    """
+    paths_a = _unique_paths(files_a)
+    paths_b = _unique_paths(files_b)
+    in_b = set(paths_b)
+    shared = [path for path in paths_a if path in in_b]
+    overlapping = {col.path for col in pair.collisions if col.overlapping}
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    _extend_unique(selected, seen, _shared_of(shared, overlapping, "source"))
+    if len(selected) < _EXCERPT_PATH_LIMIT:
+        _extend_unique(selected, seen, verifier.focus_paths(pair.symbol_evidence))
+    if len(selected) < _EXCERPT_PATH_LIMIT:
+        either = _unique_paths([*paths_a, *paths_b])
+        _extend_unique(
+            selected, seen, [path for path in either if _path_kind(path) == "config"]
+        )
+    if not selected:
+        fallback = _shared_of(shared, overlapping, "docs") + _shared_of(
+            shared, overlapping, "test_data"
+        )
+        _extend_unique(selected, seen, fallback)
+        if len(selected) < _EXCERPT_PATH_LIMIT:
+            either = _unique_paths([*paths_a, *paths_b])
+            _extend_unique(
+                selected,
+                seen,
+                [path for path in either if _path_kind(path) in {"docs", "test_data"}],
+            )
+    return selected
+
+
+def _excerpt(
+    repo: Path,
+    base_branch: str,
+    pair: PairRisk,
+    files_a: Iterable[ChangedFile | str],
+    files_b: Iterable[ChangedFile | str],
+) -> str:
+    paths = _excerpt_paths(pair, files_a, files_b)
     chunks: list[str] = []
     try:
         snippets = prefilter.evidence_snippets(repo, base_branch, pair.symbol_evidence)
@@ -221,7 +381,12 @@ def _apply_assessment(
     completion_tokens: int,
 ) -> PairRisk:
     git_score = pair.git_score if pair.git_score is not None else pair.score
-    published = combine_scores(git_score, risk_score, pair.overlapping_files)
+    published = combine_scores(
+        git_score,
+        risk_score,
+        pair.overlapping_files,
+        textual_conflict=pair.textual_conflict,
+    )
     unsupported = claims.unsupported_claims(rationale, pair.static_compatible)
     model_level = risk_level or _level(risk_score)
     return pair.model_copy(
@@ -303,7 +468,7 @@ def _refine_one(
             diff_b=diff_b,
             commits_a=_commits(repo, pair.branch_a),
             commits_b=_commits(repo, pair.branch_b),
-            excerpt=_excerpt(repo, base_branch, pair),
+            excerpt=_excerpt(repo, base_branch, pair, diff_a.files, diff_b.files),
             docs=docs_lookup.format_docs_section(snippets),
         )
         reply = nemotron.complete(prompt)
@@ -465,6 +630,9 @@ def _verify_high_risk(
 CONFIRMED_NOTE = "raised: confirmed by test"
 BRANCH_TEST_NOTE = "raised: confirmed by branch test"
 BOTH_NOTE = "raised: confirmed by branch test and intent test"
+# High starts at 70. One point under keeps the level at medium.
+CLEAN_MERGE_CAP = 69.0
+CLEAN_MERGE_NOTE = "capped: clean git merge without a high model assessment"
 
 
 def apply_verification(pair: PairRisk, result: Verification) -> PairRisk:
@@ -497,10 +665,14 @@ def apply_branch_tests(pair: PairRisk, result: BranchTests) -> PairRisk:
     if result.status == "confirmed":
         floor = float(settings.verify_confirmed_floor)
         intent = pair.verification is not None and pair.verification.status == "confirmed"
+        # The clean-merge cap lowers ``score`` and keeps the blend in
+        # ``blended_score``. Floor the higher of the two so a blend already
+        # above the floor is not pulled down to it.
+        basis = pair.score if pair.blended_score is None else max(pair.score, pair.blended_score)
         update.update(
             {
                 "blended_score": pair.blended_score if pair.blended_score is not None else pair.score,
-                "score": round(min(max(pair.score, floor), 100.0), 1),
+                "score": round(min(max(basis, floor), 100.0), 1),
                 "level": "high",
                 "score_note": BOTH_NOTE if intent else BRANCH_TEST_NOTE,
             }
@@ -523,6 +695,47 @@ def _run_branch_tests(repo: Path, base_branch: str, pairs: list[PairRisk]) -> di
             continue
         results[key] = branch_tests.check_pair(repo, base_branch, pair.branch_a, pair.branch_b)
     return results
+
+
+def _cap_clean_merge(pair: PairRisk) -> PairRisk:
+    """High on a clean merge needs the model itself to have said high.
+
+    Called after verify-by-test and before branch tests. A verification that
+    already confirmed raised the uncapped score and is left alone. Any other
+    clean pair is capped at ``CLEAN_MERGE_CAP`` unless ``score_source`` is
+    ``model`` and ``model_level`` is ``high``. The note is set only when the
+    score changes. ``textual_conflict`` true or unknown is unchanged.
+    """
+    if pair.textual_conflict is not False:
+        return pair
+    if pair.score_source == "model" and pair.model_level == "high":
+        return pair
+    if pair.verification is not None and pair.verification.status == "confirmed":
+        return pair
+    if pair.score <= CLEAN_MERGE_CAP:
+        return pair
+    score = min(pair.score, CLEAN_MERGE_CAP)
+    return pair.model_copy(
+        update={
+            "blended_score": pair.score,
+            "score": score,
+            "level": _level(score),
+            "score_note": CLEAN_MERGE_NOTE,
+        }
+    )
+
+
+def _pair_finding(pair: PairRisk) -> Literal["textual_conflict", "semantic", "none"]:
+    """Classify after scoring. A git conflict is not a semantic finding."""
+    if pair.textual_conflict is True:
+        return "textual_conflict"
+    confirmed = (
+        (pair.verification is not None and pair.verification.status == "confirmed")
+        or (pair.branch_tests is not None and pair.branch_tests.status == "confirmed")
+    )
+    if pair.level in ("high", "medium") or confirmed:
+        return "semantic"
+    return "none"
 
 
 def analyze(
@@ -552,6 +765,14 @@ def analyze(
         if focus is None or focus in (a, b):
             pairs.append(_score_pair(diff_by_branch[a], diff_by_branch[b]))
     pairs.sort(key=lambda p: p.score, reverse=True)
+    # Shown in the risk prompt. Cache key stays SHAs + prompt version because
+    # merge-tree is fixed by those SHAs; the blend reads it after the model.
+    pairs = [
+        p.model_copy(
+            update={"textual_conflict": git_service.textual_conflict(repo, p.branch_a, p.branch_b)}
+        )
+        for p in pairs
+    ]
 
     signals = _prefilter_signals(repo, diff_by_branch, pairs)
     pairs = [
@@ -586,6 +807,13 @@ def analyze(
         )
         pairs.sort(key=lambda p: p.score, reverse=True)
 
+    # After verify-by-test: is_high_risk reads level and score, and the cap
+    # (69) sits under verify_min_score (70), so doing this earlier would shrink
+    # who gets verified. Before branch tests, which still override a confirm.
+    # A verification confirm is not recapped; it already used the uncapped score.
+    pairs = [_cap_clean_merge(p) for p in pairs]
+    pairs.sort(key=lambda p: p.score, reverse=True)
+
     if branch_results:
         pairs = [
             apply_branch_tests(p, branch_results[(p.branch_a, p.branch_b)])
@@ -617,6 +845,7 @@ def analyze(
         ),
         elapsed_s=round(time.monotonic() - started, 2),
     )
+    pairs = [p.model_copy(update={"finding": _pair_finding(p)}) for p in pairs]
     return AnalyzeResponse(
         base_branch=base_branch,
         branches=branches,

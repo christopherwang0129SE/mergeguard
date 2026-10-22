@@ -319,6 +319,7 @@ def test_squash_conflict_uses_pr_head_from_local_origin(tmp_path: Path) -> None:
     replay = Path(meta["path"])
 
     assert meta["b_apply_failed"] is False and meta["b_method"] == "pr-head"
+    assert meta["a_empty"] is False and meta["b_empty"] is False
     assert meta["a_method"] == "cherry-pick" and meta["a_apply_failed"] is False
     assert meta["b"] == pr_sha
     assert _show(replay, "b", "shared.py") == "BBB\nline2\n"
@@ -401,3 +402,123 @@ def test_pr_head_fetched_into_replay_when_object_is_absent(tmp_path: Path) -> No
     assert _at_pr_head(replay, src, "b", pr_sha, 3) is True
     assert _git(replay, "rev-parse", "b").strip() == pr_sha
     assert _show(replay, "b", "f.py") == "from-pr\n"
+
+
+def test_at_pr_head_rejects_ancestor_of_a_and_empty_diff(tmp_path: Path) -> None:
+    src = _init(tmp_path)
+    base = _commit(src, "base", {"f.py": "base\n"})
+    a_sha = _commit(src, "A", {"f.py": "from-a\n"})
+    contains = _commit(src, "pr on A", {"f.py": "from-a\n", "g.py": "g\n"})
+    _git(src, "checkout", "-q", "-B", "main", base)
+    _git(src, "commit", "--allow-empty", "-q", "-m", "empty pr")
+    empty = _git(src, "rev-parse", "HEAD").strip()
+    _git(src, "checkout", "-q", "-B", "main", base)
+    parallel = _commit(src, "parallel", {"f.py": "from-pr\n"})
+    _git(src, "checkout", "-q", "-B", "main", base)
+    for number, sha in ((1, contains), (2, empty), (3, parallel)):
+        _git(src, "update-ref", f"refs/bench/pr/{number}", sha)
+
+    replay = tmp_path / "replay"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--shared", "--no-checkout", str(src), str(replay)],
+        check=True,
+    )
+    _git(replay, "checkout", "-q", "-B", "main", base)
+
+    assert _at_pr_head(replay, src, "b", contains, 1, a_sha=a_sha) is False
+    assert "b" not in _heads(replay)
+    assert _at_pr_head(replay, src, "b", empty, 2, a_sha=a_sha) is False
+    assert "b" not in _heads(replay)
+    assert _at_pr_head(replay, src, "b", parallel, 3, a_sha=a_sha) is True
+    assert _git(replay, "rev-parse", "b").strip() == parallel
+
+    _git(replay, "branch", "-D", "b")
+    unknown = "0123456789abcdef" * 2 + "01234567"
+    assert _at_pr_head(replay, src, "b", contains, 1, a_sha=unknown) is True
+    assert _git(replay, "rev-parse", "b").strip() == contains
+
+
+def _conflicting_b(src: Path, base: str, a_sha: str) -> str:
+    _git(src, "checkout", "-q", "-B", "side", a_sha)
+    b_sha = _commit(src, "change B", {"shared.py": "BBB\nline2\n"})
+    _git(src, "checkout", "-q", "-B", "main", base)
+    return b_sha
+
+
+def test_build_replay_rejects_pr_head_that_contains_a(tmp_path: Path) -> None:
+    src = _init(tmp_path)
+    base = _commit(src, "base", {"shared.py": "line1\nline2\n"})
+    a_sha = _commit(src, "change A", {"shared.py": "AAA\nline2\n"})
+    pr_sha = _commit(src, "pr after A", {"shared.py": "AAA\nfrom-pr\n"})
+    _git(src, "update-ref", "refs/bench/pr/7", pr_sha)
+    b_sha = _conflicting_b(src, base, a_sha)
+    case = _case("contains-a", base, a_sha, "direct", b_sha, "direct", b_parent=a_sha)
+    case["repo"] = "acme__widget"
+    case["b"]["pr"] = 7
+    _git(src, "merge-base", "--is-ancestor", a_sha, pr_sha)
+    differed = subprocess.run(
+        ["git", "-C", str(src), "diff", "--quiet", base, pr_sha], capture_output=True,
+    )
+    assert differed.returncode == 1
+
+    meta = build_replay(src, case, tmp_path / "replay")
+
+    assert meta["a_method"] == "cherry-pick" and meta["a_apply_failed"] is False
+    assert meta["b_apply_failed"] is True and meta["b"] is None and meta["b_method"] is None
+    assert meta["b_empty"] is False
+    assert _heads(Path(meta["path"])) == {"main", "a"}
+
+
+def test_build_replay_rejects_pr_head_with_no_diff(tmp_path: Path) -> None:
+    src = _init(tmp_path)
+    base = _commit(src, "base", {"shared.py": "line1\nline2\n"})
+    _git(src, "commit", "--allow-empty", "-q", "-m", "empty pr")
+    pr_sha = _git(src, "rev-parse", "HEAD").strip()
+    _git(src, "update-ref", "refs/bench/pr/9", pr_sha)
+    _git(src, "checkout", "-q", "-B", "main", base)
+    a_sha = _commit(src, "change A", {"shared.py": "AAA\nline2\n"})
+    b_sha = _conflicting_b(src, base, a_sha)
+    ancestor = subprocess.run(
+        ["git", "-C", str(src), "merge-base", "--is-ancestor", a_sha, pr_sha],
+        capture_output=True,
+    )
+    assert ancestor.returncode != 0
+    case = _case("empty-pr", base, a_sha, "direct", b_sha, "direct", b_parent=a_sha)
+    case["repo"] = "acme__widget"
+    case["b"]["pr"] = 9
+
+    meta = build_replay(src, case, tmp_path / "replay")
+
+    assert meta["a_method"] == "cherry-pick" and meta["a_apply_failed"] is False
+    assert meta["b_apply_failed"] is True and meta["b"] is None and meta["b_method"] is None
+    assert _heads(Path(meta["path"])) == {"main", "a"}
+
+
+def test_meta_reports_empty_branch_when_replay_is_reused(tmp_path: Path) -> None:
+    src = _init(tmp_path)
+    base = _commit(src, "base", {"app.py": "base\n"})
+    a_sha = _commit(src, "A", {"app.py": "from-a\n"})
+    _git(src, "checkout", "-q", "-B", "side", base)
+    b_sha = _commit(src, "B", {"notes.py": "n\n"})
+    case = _case("empty-meta", base, a_sha, "direct", b_sha, "direct")
+    root = tmp_path / "replay"
+
+    meta = build_replay(src, case, root)
+    replay = Path(meta["path"])
+    assert meta["a_empty"] is False and meta["b_empty"] is False
+    assert meta["a"] != meta["main"] and meta["b"] != meta["main"]
+
+    _git(replay, "branch", "-f", "b", "main")
+    again = build_replay(src, case, root)
+    assert again["b"] == meta["main"]
+    assert again["b_empty"] is True and again["a_empty"] is False
+    assert again["b_apply_failed"] is False
+    assert again["path"] == meta["path"]
+
+    _git(replay, "branch", "-f", "a", "main")
+    both = build_replay(src, case, root)
+    assert both["a_empty"] is True and both["b_empty"] is True
+
+    _git(replay, "branch", "-D", "b")
+    missing = build_replay(src, case, root, rebuild_if_b_missing=False)
+    assert missing["b"] is None and missing["b_empty"] is False

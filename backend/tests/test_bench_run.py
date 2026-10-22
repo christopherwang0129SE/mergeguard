@@ -323,6 +323,47 @@ def test_replay_failed_when_b_missing(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "parallel_evidence" not in row
 
 
+@pytest.mark.parametrize("flag", ["b_empty", "a_empty"])
+def test_replay_failed_when_branch_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
+    analysed: list[str] = []
+
+    def child(*_args, **_kwargs):
+        analysed.append("run_child")
+        raise AssertionError("analysis should not run")
+
+    def analyze(*_args, **_kwargs):
+        analysed.append("analyze_case")
+        raise AssertionError("analyze_case should not run")
+
+    def replay(src: Path, case: dict, root: Path) -> dict:
+        if case["case_id"] == "missing-b":
+            return _meta(case, Path(root), b=None)
+        meta = _meta(case, Path(root), b="bbbb")
+        meta["a_empty"] = flag == "a_empty"
+        meta["b_empty"] = flag == "b_empty"
+        return meta
+
+    monkeypatch.setattr("scripts.bench.run.analyze_case", analyze)
+    rc, results = _run(
+        tmp_path,
+        [_case("empty-b"), _case("missing-b")],
+        monkeypatch,
+        ["--dry-run"],
+        child,
+        replay=replay,
+    )
+    assert rc == 0
+    assert analysed == []
+    empty, missing = _read(results / "results.jsonl")
+    assert empty["case_id"] == "empty-b" and missing["case_id"] == "missing-b"
+    assert empty["status"] == "replay_failed" and missing["status"] == "replay_failed"
+    assert set(empty) == set(missing)
+    assert empty["b_apply_failed"] is False and missing["b_apply_failed"] is True
+    assert empty["venv_ok"] is None and empty["cost"] == 0
+    assert empty["a"]["sha"] == "a" * 40 and empty["b"]["sha"] == "b" * 40
+    assert "level" not in empty and "flagged" not in empty and "error" not in empty
+
+
 def test_replay_failed_records_parallel_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(src: Path, case: dict, root: Path) -> dict:
         raise RuntimeError("clone failed")
@@ -407,6 +448,15 @@ def test_analyze_case_projects_pair(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         branch_tests = type("B", (), {"status": "passed", "reason": "ok"})()
         docs_sources = [1, 2, 3]
         rationale = "r" * 500
+        finding = "semantic"
+        textual_conflict = False
+        git_score = 40.0
+        model_level = "high"
+        shared_files = 2
+        overlapping_files = 1
+        symbol_overlap = ["a", "b"]
+        static_breaks = ["sig"]
+        prefilter_candidate = True
 
     class Usage:
         llm_calls = 2
@@ -435,8 +485,32 @@ def test_analyze_case_projects_pair(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert payload["verification"] == {"status": "confirmed", "reason": "broke", "attempts": 2}
     assert payload["branch_tests"] == {"status": "passed", "reason": "ok"}
     assert payload["usage"]["llm_calls"] == 2
+    assert payload["finding"] == "semantic"
+    assert payload["app_textual_conflict"] is False
+    assert payload["git_score"] == 40.0
+    assert payload["model_level"] == "high"
+    assert payload["shared_files"] == 2
+    assert payload["overlapping_files"] == 1
+    assert payload["symbol_overlap"] == 2
+    assert payload["static_breaks"] == 1
+    assert payload["prefilter_candidate"] is True
     assert is_flagged(payload) is True
     assert is_confirmed(payload) is True
+
+
+def test_textual_conflict_finding_is_not_flagged() -> None:
+    plain = _verdict(level="high")
+    assert "finding" not in plain
+    assert is_flagged(plain) is True
+
+    conflict = _verdict(level="high", verification="confirmed", branch="confirmed")
+    conflict["finding"] = "textual_conflict"
+    assert is_flagged(conflict) is False
+    assert is_confirmed(conflict) is True
+
+    semantic = _verdict(level="high")
+    semantic["finding"] = "semantic"
+    assert is_flagged(semantic) is True
 
 
 def test_child_crash_scrubs_stderr(tmp_path: Path) -> None:

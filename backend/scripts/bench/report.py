@@ -123,10 +123,19 @@ def is_confirmed(row: dict) -> bool:
         return stored
     return _field(row, "verification", "status") == "confirmed" or _field(row, "branch_tests", "status") == "confirmed"
 def is_flagged(row: dict) -> bool:
+    # Same rule as scripts.bench.run: a textual conflict is not a semantic flag.
+    # Records with no ``finding`` keep the stored (or derived) flagged bit.
+    if row.get("finding") == "textual_conflict":
+        return False
     stored = _stored(row, "flagged")
     if stored is None:
         return row.get("level") == "high" or is_confirmed(row)
     return stored
+def _textual_category(row: dict) -> bool:
+    """New records use ``finding``. Old records fall back to replay ``textual_conflict``."""
+    if "finding" in row and row.get("finding") is not None:
+        return row.get("finding") == "textual_conflict"
+    return bool(row.get("textual_conflict"))
 def mined_gt(row: dict) -> str | None:
     return row.get("label") if row.get("label") in {"broke", "clean"} else None
 def hand_gt(row: dict, hand: dict | None) -> str | None:
@@ -243,6 +252,7 @@ def build_summary(rows: list[dict], labels: dict, src_root: Path | None = None) 
         "n_replay_failed": status.get("replay_failed", 0), "n_timeout": status.get("timeout", 0),
         "n_error": status.get("error", 0),
         "n_flagged": sum(map(is_flagged, rows)), "n_confirmed": sum(map(is_confirmed, rows)),
+        "n_textual_conflicts": sum(map(_textual_category, rows)),
         "n_labels": len(labels), "non_ok": _non_ok(rows), "variants": variants,
         "cost": _agg([_num(row, "cost") for row in rows]),
         "seconds": _agg([_num(row, "seconds") for row in rows]),
@@ -297,7 +307,8 @@ def render_markdown(summary: dict) -> str:
         "# Bench report", "", "## Headline", "",
         f"{summary['n_cases']} cases, {summary['n_ok']} ok, {summary['n_replay_failed']} replay_failed, "
         f"{summary['n_timeout']} timeout, {summary['n_error']} error. "
-        f"{summary['n_flagged']} flagged, {summary['n_confirmed']} confirmed. Cost {_fmt(cost['total'])}.",
+        f"{summary['n_flagged']} flagged, {summary['n_confirmed']} confirmed. Cost {_fmt(cost['total'])}. "
+        f"{summary['n_textual_conflicts']} textual conflicts (separate category).",
         "",
     ]
     for name, variant in (("Mined", "mined"), ("Hand", "hand")):

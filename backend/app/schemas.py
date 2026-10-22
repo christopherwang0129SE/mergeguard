@@ -212,9 +212,14 @@ class PairRisk(BaseModel):
     # Branch tests on the merge (deterministic, no LLM; local allowed repos only).
     branch_tests: BranchTests | None = None
     # Set when something other than the git/model blend decided `score`/`level`,
-    # e.g. "raised: confirmed by test". `blended_score` keeps the blend.
+    # e.g. "raised: confirmed by test" or the clean-merge cap.
+    # `blended_score` keeps the blend.
     score_note: str | None = None
     blended_score: float | None = Field(default=None, ge=0, le=100)
+    # git merge-tree --write-tree. True: conflict. False: clean. None: git could not say.
+    textual_conflict: bool | None = None
+    # A git conflict is its own category, not a semantic interaction finding.
+    finding: Literal["textual_conflict", "semantic", "none"] = "none"
 
 
 class UsageSummary(BaseModel):
